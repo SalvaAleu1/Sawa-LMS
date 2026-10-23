@@ -470,8 +470,8 @@ app.post("/api/v1/institution/results/:id/action",async(c)=>{
  let body:Record<string,unknown>;try{body=await c.req.json<Record<string,unknown>>()}catch{return c.json({error:"invalid_json",message:"Submit a valid result action."},400)}
  const tenant=clean(body.institutionId,64),action=clean(body.action,30);
  if(!tenant||!["submit","approve","publish"].includes(action))return c.json({error:"validation_error",message:"Choose a valid result action."},400);
- const {data:member}=await a.supabase.from("institution_memberships").select("role").eq("institution_id",tenant).eq("user_id",a.user.id).eq("status","active").maybeSingle();
- if(!member||!["institution_admin","staff"].includes(member.role))return c.json({error:"forbidden",message:"Institution administrator or authorized staff access is required."},403);
+ const {data:member}=await a.supabase.from("institution_memberships").select("id,role").eq("institution_id",tenant).eq("user_id",a.user.id).eq("status","active").maybeSingle();
+ if(!member||!(action==="submit"?["institution_admin","staff","lecturer"].includes(member.role):member.role==="institution_admin"))return c.json({error:"forbidden",message:"Submission requires teaching access; approval and publication require an institution administrator."},403);
  const {data:result}=await a.supabase.from("result_publications").select("id,status,title,term_id").eq("id",id).eq("institution_id",tenant).maybeSingle();
  if(!result)return c.json({error:"not_found",message:"Result publication not found."},404);
  if(action==="submit"&&result.status==="draft"){
