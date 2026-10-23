@@ -1,0 +1,5 @@
+/partners/apply /index.html 200
+/platform/review /index.html 200
+/platform/subscriptions /index.html 200
+/verify/* /index.html 200
+/* /index.html 200
