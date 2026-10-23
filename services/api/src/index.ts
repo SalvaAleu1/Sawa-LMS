@@ -602,6 +602,26 @@ app.post("/api/v1/assessments/submissions/:submissionId/grade",async(c)=>{
  return c.json({submission:updated});
 });
 
+
+app.post("/api/v1/grades/:id/action",async(c)=>{
+ const a=await requireSignedIn(c);if("error" in a)return c.json({error:"unauthorized"},401);
+ const id=c.req.param("id");let body:Record<string,unknown>;try{body=await c.req.json<Record<string,unknown>>()}catch{return c.json({error:"invalid_json"},400)}
+ const tenant=clean(body.institutionId,64),action=clean(body.action,20);
+ if(!validUuid(id)||!validUuid(tenant)||!["submit","approve"].includes(action))return c.json({error:"validation_error",message:"Choose a valid grade action."},400);
+ const roles=action==="approve"?["institution_admin"]:["institution_admin","staff","lecturer"];
+ const member=await requireInstitutionRole(a,tenant,roles);if(!member)return c.json({error:"forbidden",message:action==="approve"?"Only an institution administrator can approve grades.":"Teaching or administrator access is required."},403);
+ const {data:grade}=await a.supabase.from("grades").select("id,status,course_id,learner_id,score,term_id").eq("id",id).eq("institution_id",tenant).maybeSingle();
+ if(!grade)return c.json({error:"not_found",message:"Grade not found."},404);
+ if(member.role==="lecturer"){const {data:course}=await a.supabase.from("courses").select("id").eq("id",grade.course_id).eq("lecturer_membership_id",member.id).maybeSingle();if(!course)return c.json({error:"forbidden",message:"You are not assigned to this course."},403);}
+ const next=action==="submit"&&grade.status==="draft"?"submitted":action==="approve"&&grade.status==="submitted"?"approved":null;
+ if(!next)return c.json({error:"invalid_transition",message:"Grades must move from draft to submitted, then approved."},409);
+ const patch:Record<string,unknown>={status:next};if(action==="approve")patch.approved_by=a.user.id;
+ const {data:updated,error}=await a.supabase.from("grades").update(patch).eq("id",id).eq("institution_id",tenant).select("id,status,score,letter_grade").single();
+ if(error)return c.json({error:"grade_update_failed"},400);
+ await a.supabase.from("audit_logs").insert({actor_user_id:a.user.id,institution_id:tenant,action:"grade_"+action,target_type:"grade",target_id:id,metadata:{previous_status:grade.status,new_status:next,course_id:grade.course_id,learner_id:grade.learner_id}});
+ return c.json({updated:true,grade:updated});
+});
+
 app.get("/api/v1/learners/:learnerId/transcript",async(c)=>{
  const a=await requireSignedIn(c);if("error" in a)return c.json({error:"unauthorized"},401);
  const learnerId=c.req.param("learnerId"),tenant=clean(c.req.query("institutionId"),64);if(!validUuid(learnerId)||!validUuid(tenant))return c.json({error:"validation_error"},400);
