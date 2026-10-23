@@ -22,7 +22,7 @@ const sections: { id: Section; label: string; table: string; icon: typeof BookOp
 ];
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL as string | undefined;
 const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY as string | undefined;
-const apiBase = (import.meta.env.VITE_API_BASE_URL as string | undefined)?.replace(/\\/+$/, "");
+const apiBase = (import.meta.env.VITE_API_BASE_URL as string | undefined)?.replace(/[/]+$/, "");
 
 export default function InstitutionWorkspace() {
  const client = useMemo<SupabaseClient | null>(() => supabaseUrl && supabaseAnonKey ? createClient(supabaseUrl,supabaseAnonKey) : null, []);
