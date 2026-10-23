@@ -304,7 +304,7 @@ app.post("/api/v1/storage/upload",async(c)=>{
  const a=await requireSignedIn(c);if("error" in a)return c.json({error:"unauthorized",message:"Sign in before uploading a course resource."},401);
  if(!c.env.R2_BUCKET)return c.json({error:"storage_unavailable",message:"File storage is not configured."},503);
  let form:FormData;try{form=await c.req.formData()}catch{return c.json({error:"invalid_upload",message:"Submit a valid file upload."},400)}
- const file=form.get("file"),tenant=clean(form.get("institutionId"),64),courseId=clean(form.get("courseId"),64),title=clean(form.get("title"),180);
+ const file=form.get("file") as unknown as File|null,tenant=clean(form.get("institutionId"),64),courseId=clean(form.get("courseId"),64),title=clean(form.get("title"),180);
  if(!(file instanceof File)||!tenant||!courseId||title.length<2)return c.json({error:"validation_error",message:"Choose a course, title and file."},400);
  if(file.size<1||file.size>20*1024*1024)return c.json({error:"file_size",message:"Files must be no larger than 20 MB."},413);
  if(!uploadTypes.has(file.type))return c.json({error:"file_type",message:"This file type is not supported."},415);
