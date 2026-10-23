@@ -24,6 +24,10 @@ export default function PlatformReview() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
+  const [slugs, setSlugs] = useState<Record<string, string>>({});
+  const [plans, setPlans] = useState<Record<string, string>>({});
+  const [periods, setPeriods] = useState<Record<string, string>>({});
+  const [issuedInvite, setIssuedInvite] = useState<{ institutionName: string; email: string; token: string; expiresInHours: number } | null>(null);
 
   useEffect(() => {
     if (!supabase) return;
@@ -34,7 +38,7 @@ export default function PlatformReview() {
 
   async function loadQueue(current = session, selected = filter) {
     if (!current || !apiBase) return;
-    setBusy(true); setError(""); setNotice("");
+    setBusy(true); setError(""); setNotice(""); setIssuedInvite(null);
     try {
       const response = await fetch(`${apiBase}/api/v1/platform/partner-applications?status=${encodeURIComponent(selected)}`, {
         headers: { Authorization: `Bearer ${current.access_token}` },
@@ -76,6 +80,30 @@ export default function PlatformReview() {
     finally { setBusy(false); }
   }
 
+
+  async function approve(application: Application) {
+    if (!session || !apiBase) return;
+    const slug = (slugs[application.id] || application.display_name).toLowerCase().trim()
+      .replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 60);
+    const planCode = plans[application.id] || "starter";
+    const period = periods[application.id] || "monthly";
+    if (!slug) { setError("Enter a valid institution slug."); return; }
+    setBusy(true); setError(""); setNotice(""); setIssuedInvite(null);
+    try {
+      const response = await fetch(`${apiBase}/api/v1/platform/partner-applications/${application.id}/approve`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${session.access_token}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ slug, planCode, period }),
+      });
+      const result = await response.json() as { approved?: boolean; invitationToken?: string; expiresInHours?: number; message?: string };
+      if (!response.ok || !result.approved || !result.invitationToken) throw new Error(result.message || "Could not approve this application.");
+      setIssuedInvite({ institutionName: application.display_name, email: application.contact_email, token: result.invitationToken, expiresInHours: result.expiresInHours || 72 });
+      setNotice("Institution approved. Copy the one-time invitation token now and send it securely to the approved contact.");
+      await loadQueue(session, filter);
+    } catch (e) { setError(e instanceof Error ? e.message : "Approval failed."); }
+    finally { setBusy(false); }
+  }
+
   async function signOut() { await supabase?.auth.signOut(); setApplications([]); }
 
   return <main className="review-page">
@@ -88,16 +116,16 @@ export default function PlatformReview() {
         <form onSubmit={signIn}><label>Email address<input type="email" required autoComplete="username" value={email} onChange={e=>setEmail(e.target.value)}/></label><label>Password<input type="password" required autoComplete="current-password" value={password} onChange={e=>setPassword(e.target.value)}/></label><button className="partner-submit" disabled={busy || !supabase}>{busy ? "Signing in…" : "Sign in to review"} <LogIn size={16}/></button></form>
         <p className="review-footnote">Sign-in alone does not grant review permission. The API checks platform membership on every request.</p>
       </div> : <>
-        <div className="review-title-row"><div><p className="review-kicker">PARTNER ONBOARDING</p><h1>Application review queue</h1><p className="review-muted">Review applications submitted by institutions. Approval and administrator invitations are intentionally not enabled until the secure provisioning workflow is complete.</p></div><button className="review-signout" onClick={signOut}>Sign out</button></div>
+        <div className="review-title-row"><div><p className="review-kicker">PARTNER ONBOARDING</p><h1>Application review queue</h1><p className="review-muted">Review partner applications, approve an institution, and issue a one-time first-administrator invitation.</p></div><button className="review-signout" onClick={signOut}>Sign out</button></div>
         <div className="review-toolbar"><div className="review-tabs">{[{value:"pending_review",label:"New applications"},{value:"under_review",label:"Under review"},{value:"rejected",label:"Rejected"}].map(t=><button key={t.value} className={filter===t.value?"review-tab active":"review-tab"} onClick={()=>setFilter(t.value)}>{t.label}</button>)}</div><button className="review-refresh" onClick={()=>void loadQueue()} disabled={busy}><RefreshCw size={15}/> Refresh</button></div>
-        {error && <div className="review-error" role="alert">{error}</div>}{notice && <div className="review-notice"><CheckCircle2 size={16}/>{notice}</div>}
+        {error && <div className="review-error" role="alert">{error}</div>}{notice && <div className="review-notice"><CheckCircle2 size={16}/>{notice}</div>}{issuedInvite && <div className="review-card"><h2>One-time administrator invitation</h2><p>Institution: <b>{issuedInvite.institutionName}</b></p><p>Send only to: <b>{issuedInvite.email}</b></p><p>Expires in {issuedInvite.expiresInHours} hours. The token is shown only once.</p><code style={{display:"block",overflowWrap:"anywhere",padding:"12px",background:"#f2f5f7",borderRadius:"8px"}}>{issuedInvite.token}</code><button className="review-under" onClick={() => void navigator.clipboard.writeText(issuedInvite.token)}>Copy invitation token</button><p className="review-footnote">The recipient must create or sign in to a SawaLearn account using the approved email, then redeem the token through the invitation redemption endpoint. Do not post this token publicly.</p></div>}
         {busy && applications.length===0 ? <div className="review-empty">Loading applications…</div> : applications.length===0 ? <div className="review-empty"><CheckCircle2 size={24}/><b>No applications in this queue</b><span>New partner submissions will appear here once saved in Supabase.</span></div> :
           <div className="review-list">{applications.map(a=><article className="review-card" key={a.id}>
             <div className="review-card-head"><div><span className="review-status">{a.status.replaceAll("_"," ")}</span><h2>{a.display_name}</h2><p>{a.legal_name} · {a.country_code} · {a.institution_type.replaceAll("_"," ")}</p></div><time>{new Date(a.created_at).toLocaleDateString()}</time></div>
             <div className="review-details"><div><small>CONTACT</small><b>{a.contact_name}</b><a href={`mailto:${a.contact_email}`}>{a.contact_email}</a><span>{a.contact_phone}</span></div><div><small>ESTIMATED LEARNERS</small><b>{a.estimated_learners.toLocaleString()}</b>{a.website && <a href={a.website} target="_blank" rel="noreferrer">Institution website ↗</a>}</div></div>
             {a.message && <p className="review-message">{a.message}</p>}
             <label className="review-notes-label">Internal review notes<textarea rows={2} maxLength={1000} value={notes[a.id] ?? a.review_notes ?? ""} onChange={e=>setNotes(v=>({...v,[a.id]:e.target.value}))} placeholder="Add notes for the review record (optional)"/></label>
-            {a.status!=="rejected" && <div className="review-actions"><button className="review-under" disabled={busy} onClick={()=>void review(a,"under_review")}><CheckCircle2 size={15}/> Mark under review</button><button className="review-reject" disabled={busy} onClick={()=>void review(a,"rejected")}><XCircle size={15}/> Reject application</button></div>}
+            {a.status!=="rejected" && <><div className="review-actions"><button className="review-under" disabled={busy} onClick={()=>void review(a,"under_review")}><CheckCircle2 size={15}/> Mark under review</button><button className="review-reject" disabled={busy} onClick={()=>void review(a,"rejected")}><XCircle size={15}/> Reject application</button></div><div className="review-approval"><label>Institution URL slug<input value={slugs[a.id] ?? a.display_name.toLowerCase().replace(/[^a-z0-9]+/g,"-").replace(/^-|-$/g,"")} onChange={e=>setSlugs(v=>({...v,[a.id]:e.target.value}))} maxLength={60}/></label><label>Plan<select value={plans[a.id] || "starter"} onChange={e=>setPlans(v=>({...v,[a.id]:e.target.value}))}><option value="starter">Starter — $25/month</option><option value="standard">Standard — $75/month</option><option value="professional">Professional — $200/month</option><option value="enterprise">Enterprise — $400/month</option></select></label><label>Billing period<select value={periods[a.id] || "monthly"} onChange={e=>setPeriods(v=>({...v,[a.id]:e.target.value}))}><option value="monthly">Monthly</option><option value="annual">Annual</option></select></label><button className="partner-submit" disabled={busy || a.status==="approved"} onClick={()=>void approve(a)}>Approve & issue admin invitation</button></div></>}
           </article>)}</div>}
       </>}
     </section>
