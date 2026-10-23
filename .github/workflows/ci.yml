@@ -70,6 +70,18 @@ jobs:
             if not exists (select 1 from pg_proc where proname='redeem_first_admin_invite') then
               raise exception 'first-admin invitation redemption function is missing';
             end if;
+            if not exists (select 1 from information_schema.tables where table_schema='public' and table_name='assignment_submissions') then
+              raise exception 'assignment submission workflow table is missing';
+            end if;
+            if not exists (select 1 from pg_proc where proname='adjust_storage_usage') then
+              raise exception 'atomic storage reservation function is missing';
+            end if;
+            if not exists (select 1 from pg_proc where proname='verify_certificate') then
+              raise exception 'certificate verification function is missing';
+            end if;
+            if not exists (select 1 from pg_indexes where schemaname='public' and indexname='grades_assessment_result_unique') then
+              raise exception 'assessment grade idempotency index is missing';
+            end if;
           end $$;
           SQL
 

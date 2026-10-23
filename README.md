@@ -6,7 +6,7 @@ SawaLearn is a multi-tenant learning and institution-management platform for uni
 ## Included workflows
 - Institution application intake, platform review and controlled first-administrator invitations.
 - Institution sign-in and tenant-scoped workspace.
-- Learner records, staff/member invitations and activation, courses, enrolments, learning materials, assignments, assessment question authoring, learner submissions, objective auto-grading and manual grading, attendance sessions and records, grades, staged result approval/publication, announcements and timetable records.
+- Learner records, staff/member invitations and activation, courses, enrolments, learning materials, assignments, assessment question authoring, learner submissions, objective auto-grading and manual grading, assignment text submissions and lecturer grading, attendance sessions and records, grades, staged result approval/publication, announcements and timetable records.
 - Published-grade transcript calculations (term GPA and cumulative GPA) and one-time-token certificate issuance with public verification.
 - Private Cloudflare R2 uploads with file-type/size validation, institution membership checks and plan storage-quota checks.
 - Subscription review, manually recorded and confirmed cash receipts, platform-owner extension/termination actions, seven-day renewal reminders and grace-period overdue alerts.
