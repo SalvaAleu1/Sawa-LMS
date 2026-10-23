@@ -1,44 +1,67 @@
 # SawaLearn
 **One platform. Every learning journey.**
 
-SawaLearn is a multi-tenant learning management and institution-management platform for universities, colleges, schools and vocational training centres. This repository is independent of the University of Juba portal.
+SawaLearn is a multi-tenant learning and institution-management platform for universities, colleges, schools and vocational training centres. It is independent of the University of Juba portal.
 
-## Seven-stage delivery plan
-1. **Foundation** — brand, app shell, environment configuration, database baseline, CI and security conventions.
-2. **Platform administration** — platform-owner controls, institution approval, secure first-admin invitations, plan and payment review.
-3. **Institution management** — tenant isolation, institution workspace, configurable academic structures, staff and learner lifecycle.
-4. **Learning and academic operations** — courses, learning materials, assessments, attendance, grading, examinations and results approvals.
-5. **Automation** — subscription notices, 7-day grace period, capacity warnings, retries, idempotency and audit trail.
-6. **Advanced features** — transcripts and QR verification, alumni, reporting, PWA/low-bandwidth support and optional integrations.
-7. **Production verification** — automated tests, tenant-isolation checks, accessibility, deployment, backups, monitoring and release checklist.
-
-## Current implementation status
-This branch establishes the initial application foundation and database baseline. It is **not yet a production-ready LMS**; the remaining stages must be implemented and verified before real institutional data is onboarded.
+## Included workflows
+- Institution application intake, platform review and controlled first-administrator invitations.
+- Institution sign-in and tenant-scoped workspace.
+- Learner records, staff/member invitations and activation, courses, enrolments, learning materials, assignments, assessments, attendance sessions and records, grades, result publication, announcements and timetable records.
+- Private Cloudflare R2 uploads with file-type/size validation, institution membership checks and plan storage-quota checks.
+- Subscription review, manually recorded and confirmed cash receipts, platform-owner extension/termination actions, seven-day renewal reminders and grace-period overdue alerts.
+- Idempotent email notification queue with retries and capacity warnings at 80%, 90% and 100%.
+- PostgreSQL migration validation and tenant-isolation smoke tests in GitHub Actions.
 
 ## Architecture
 - React + TypeScript + Vite frontend.
-- Cloudflare Worker API (Hono) for server-side request handling.
-- Supabase PostgreSQL/Auth; Row Level Security and tenant-scoped policies.
-- Cloudflare R2 for object storage (signed access via server-side authorization).
-- Resend-compatible transactional email adapter.
-- GitHub Actions for type/build checks.
+- Cloudflare Worker API (Hono).
+- Supabase PostgreSQL/Auth with row-level security and tenant-consistent foreign keys.
+- Private Cloudflare R2 bucket for learning files.
+- Resend for transactional email delivery.
+- GitHub Actions for type checks, frontend build, tests and isolated PostgreSQL migration validation.
 
-## Local development
-1. Install Node.js 20+ and pnpm 9+.
-2. Run `pnpm install`.
-3. Copy `.env.example` to `.env.local` and set the public Supabase URL/key for the frontend. Never expose service-role keys.
-4. Run `pnpm dev`.
-5. Worker development: `pnpm --filter @sawalearn/api dev`.
+## Local verification
+Requirements: Node.js 20+, pnpm 9+, and PostgreSQL 16 for the database integration tests.
 
-## Security rules
+```sh
+pnpm install
+cp .env.example .env.local
+pnpm typecheck
+pnpm typecheck:api
+pnpm test
+pnpm build
+pnpm dev
+```
+
+For Worker development: `pnpm --filter @sawalearn/api dev`.
+
+## Environment and Cloudflare configuration
+Frontend build variables:
+- `VITE_SUPABASE_URL`: Supabase project URL.
+- `VITE_SUPABASE_ANON_KEY`: public anonymous key only.
+- `VITE_API_BASE_URL`: deployed SawaLearn Worker base URL, without a trailing slash.
+
+Worker secrets (never expose in frontend variables or source control):
+- `SUPABASE_URL`
+- `SUPABASE_SERVICE_ROLE_KEY`
+- `RESEND_API_KEY`
+- `RESEND_FROM`
+
+Set `APP_BASE_URL` as a Worker variable to the exact frontend origin for CORS and invitation redirects. The Worker configuration binds the private R2 bucket `sawalearn-files` and schedules daily maintenance at 02:17 UTC. Create the bucket before deploying the Worker.
+
+## Database rollout
+Apply migrations in filename order from `supabase/migrations` to the intended Supabase project after reviewing them. GitHub Actions applies them to an isolated PostgreSQL instance and executes a two-tenant RLS/foreign-key smoke test; this does not apply migrations to your production project.
+
+## Security and operating rules
 - Never trust tenant IDs, roles, plan limits or payment status supplied by the browser.
-- Enforce authorization on the server and in PostgreSQL RLS.
-- First institutional administrator accounts require platform-owner approval and a one-time invite.
-- Cash payments are recorded and confirmed manually; never infer receipt.
-- Expiry never deletes data or automatically terminates an institution. Keep service available with overdue state until the platform owner acts.
-- At capacity, block only new activations or uploads that exceed limits; existing users and materials remain accessible.
-- Archive/deactivate people instead of deleting academic history.
-- Do not store passwords, payment PINs, secrets or service-role keys in source control.
+- Keep the service-role key exclusively in Worker secrets.
+- First institutional administrators require platform-owner approval and one-time invitations.
+- Members must verify their invitation email before an administrator activates their access.
+- Cash payments remain pending until an authorized operator confirms the receipt.
+- Subscription expiry never deletes data and never triggers automatic termination. After the seven-day grace period, the subscription is marked overdue and requires a platform-owner decision.
+- Capacity limits prevent new activations and uploads beyond allowance; existing access and academic history are preserved.
+- Archived users and historical academic records are retained.
+- Do not onboard real student records until the full CI suite passes and the production checklist is complete.
 
-## Deployment
-Configure Cloudflare Worker secrets with Wrangler and apply reviewed SQL migrations to the correct Supabase project. Run CI and the production checklist before release. See `docs/RELEASE-CHECKLIST.md`.
+## Release
+See [docs/RELEASE-CHECKLIST.md](docs/RELEASE-CHECKLIST.md). Production service availability, real Supabase Auth email delivery, R2 bucket configuration, and live-provider behavior must be verified after the repository is deployed and credentials are configured.
