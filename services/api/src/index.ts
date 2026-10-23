@@ -379,6 +379,60 @@ async function runScheduledTasks(env:Env["Bindings"]){
  }
 }
 
+
+app.post("/api/v1/institution/members/invite",async(c)=>{
+ const a=await requireSignedIn(c);if("error" in a)return c.json({error:"unauthorized",message:"Sign in to invite institution members."},401);
+ let body:Record<string,unknown>;try{body=await c.req.json<Record<string,unknown>>()}catch{return c.json({error:"invalid_json",message:"Submit a valid member invitation."},400)}
+ const tenant=clean(body.institutionId,64),email=clean(body.email,254).toLowerCase(),role=clean(body.role,30);
+ if(!tenant||!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)||!["learner","lecturer","staff","institution_admin"].includes(role))return c.json({error:"validation_error",message:"Provide an institution, valid email address and permitted role."},400);
+ const {data:actor}=await a.supabase.from("institution_memberships").select("role").eq("institution_id",tenant).eq("user_id",a.user.id).eq("status","active").maybeSingle();
+ if(!actor||actor.role!=="institution_admin")return c.json({error:"forbidden",message:"Only an institution administrator can invite members."},403);
+ const {data:institution}=await a.supabase.from("institutions").select("status,display_name").eq("id",tenant).maybeSingle();
+ if(!institution||institution.status!=="active")return c.json({error:"institution_inactive",message:"This institution is not active."},403);
+ const {data:subscription}=await a.supabase.from("institution_subscriptions").select("status,subscription_plans(max_active_users)").eq("institution_id",tenant).in("status",["active","grace_period"]).order("created_at",{ascending:false}).limit(1).maybeSingle();
+ if(!subscription)return c.json({error:"subscription_inactive",message:"An active subscription is required to invite members."},403);
+ const plan=subscription.subscription_plans as unknown as {max_active_users:number}|null;
+ const {count}=await a.supabase.from("institution_memberships").select("id",{count:"exact",head:true}).eq("institution_id",tenant).eq("status","active");
+ if(!plan||Number(count||0)>=Number(plan.max_active_users))return c.json({error:"capacity_limit",message:"The active-user allowance has been reached. Archive an inactive account or contact the platform owner to change the plan."},409);
+ const fullName=clean(body.displayName,120),first=clean(body.firstName,100),last=clean(body.lastName,100),learnerNumber=clean(body.learnerNumber,80);
+ if(fullName.length<2||(role==="learner"&&(first.length<1||last.length<1||learnerNumber.length<1)))return c.json({error:"validation_error",message:"Enter the member's full name; learner invitations also require first name, last name and learner ID."},400);
+ const {data:invited,error:inviteError}=await a.supabase.auth.admin.inviteUserByEmail(email,{data:{full_name:fullName},redirectTo:c.env.APP_BASE_URL});
+ if(inviteError||!invited.user){console.error("Institution invite failed",{message:inviteError?.message});return c.json({error:"invite_failed",message:"The invitation could not be sent. Confirm Auth email delivery is configured."},400)}
+ const userId=invited.user.id;
+ const {error:profileError}=await a.supabase.from("profiles").upsert({id:userId,display_name:fullName,email},{onConflict:"id"});
+ if(profileError){console.error("Profile provisioning failed",{code:profileError.code});return c.json({error:"member_provisioning_failed",message:"The invitation was sent but the profile could not be created. Contact support before resending."},500)}
+ const {data:membership,error:memberError}=await a.supabase.from("institution_memberships").insert({institution_id:tenant,user_id:userId,role,status:"invited"}).select("id,role,status").single();
+ if(memberError){console.error("Membership provisioning failed",{code:memberError.code});return c.json({error:"member_provisioning_failed",message:"The invitation was sent but membership could not be created. Contact support."},500)}
+ if(role==="learner"){
+  const {error:learnerError}=await a.supabase.from("learner_records").insert({institution_id:tenant,user_id:userId,learner_number:learnerNumber,first_name:first,last_name:last,status:"invited"});
+  if(learnerError){await a.supabase.from("institution_memberships").delete().eq("id",membership.id);console.error("Learner record provisioning failed",{code:learnerError.code});return c.json({error:"member_provisioning_failed",message:"The learner record could not be created. Check the learner ID and try again."},400)}
+ }
+ await a.supabase.from("audit_logs").insert({actor_user_id:a.user.id,institution_id:tenant,action:"institution_member_invited",target_type:"institution_membership",target_id:membership.id,metadata:{email,role}});
+ return c.json({invited:true,membershipId:membership.id,email,role,status:"invited",message:"Invitation sent. Activate access after the member verifies their email."},201);
+});
+
+app.post("/api/v1/institution/members/:membershipId/activate",async(c)=>{
+ const a=await requireSignedIn(c);if("error" in a)return c.json({error:"unauthorized",message:"Sign in to activate an institution member."},401);
+ const membershipId=c.req.param("membershipId");if(!/^[0-9a-f-]{36}$/i.test(membershipId))return c.json({error:"validation_error",message:"Invalid membership reference."},400);
+ let body:Record<string,unknown>;try{body=await c.req.json<Record<string,unknown>>()}catch{return c.json({error:"invalid_json",message:"Provide the institution reference."},400)}
+ const tenant=clean(body.institutionId,64);
+ const {data:actor}=await a.supabase.from("institution_memberships").select("role").eq("institution_id",tenant).eq("user_id",a.user.id).eq("status","active").maybeSingle();
+ if(!actor||actor.role!=="institution_admin")return c.json({error:"forbidden",message:"Only an institution administrator can activate accounts."},403);
+ const {data:member}=await a.supabase.from("institution_memberships").select("id,user_id,role,status").eq("id",membershipId).eq("institution_id",tenant).maybeSingle();
+ if(!member||member.status!=="invited")return c.json({error:"not_found",message:"An invited member was not found."},404);
+ const {data:user,error:userError}=await a.supabase.auth.admin.getUserById(member.user_id);
+ if(userError||!user.user?.email_confirmed_at)return c.json({error:"email_not_verified",message:"The member must verify their email before activation."},409);
+ const {data:subscription}=await a.supabase.from("institution_subscriptions").select("status,subscription_plans(max_active_users)").eq("institution_id",tenant).in("status",["active","grace_period"]).order("created_at",{ascending:false}).limit(1).maybeSingle();
+ const plan=subscription?.subscription_plans as unknown as {max_active_users:number}|null;
+ const {count}=await a.supabase.from("institution_memberships").select("id",{count:"exact",head:true}).eq("institution_id",tenant).eq("status","active");
+ if(!plan||Number(count||0)>=Number(plan.max_active_users))return c.json({error:"capacity_limit",message:"The active-user allowance has been reached. Archive an inactive account or contact the platform owner."},409);
+ const {data:updated,error:updateError}=await a.supabase.from("institution_memberships").update({status:"active",activated_at:new Date().toISOString()}).eq("id",membershipId).select("id,status,role").single();
+ if(updateError)return c.json({error:"activation_failed",message:"The account could not be activated."},400);
+ if(member.role==="learner")await a.supabase.from("learner_records").update({status:"active"}).eq("institution_id",tenant).eq("user_id",member.user_id);
+ await a.supabase.from("audit_logs").insert({actor_user_id:a.user.id,institution_id:tenant,action:"institution_member_activated",target_type:"institution_membership",target_id:membershipId,metadata:{role:member.role}});
+ return c.json({activated:true,membership:updated});
+});
+
 app.notFound((c) => c.json({ error: "not_found", message: "The requested resource was not found." }, 404));
 app.onError((error, c) => {
   console.error("SawaLearn API request failed", { message: error.message, path: c.req.path });
