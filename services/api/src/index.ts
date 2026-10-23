@@ -133,6 +133,35 @@ async function requirePlatformOperator(c: Context<Env>) {
   return { user: authData.user, supabase };
 }
 
+
+app.post("/api/v1/invitations/redeem", async (c) => {
+  const authorization = c.req.header("Authorization") || "";
+  const token = authorization.startsWith("Bearer ") ? authorization.slice(7) : "";
+  const url = c.env.SUPABASE_URL;
+  const key = c.env.SUPABASE_SERVICE_ROLE_KEY;
+  if (!token || !url || !key) return c.json({ error: "unauthorized", message: "Sign in to the account matching the invitation email first." }, 401);
+  const supabase = createClient(url, key, { auth: { persistSession: false, autoRefreshToken: false } });
+  const { data: authData, error: authError } = await supabase.auth.getUser(token);
+  if (authError || !authData.user || !authData.user.email) return c.json({ error: "unauthorized", message: "Your session is invalid. Please sign in again." }, 401);
+  let body: Record<string, unknown>;
+  try { body = await c.req.json<Record<string, unknown>>(); }
+  catch { return c.json({ error: "invalid_json", message: "Submit a valid invitation request." }, 400); }
+  const inviteToken = clean(body.token, 128).toLowerCase();
+  const displayName = clean(body.displayName, 120);
+  if (!/^[a-f0-9]{64}$/.test(inviteToken) || displayName.length < 2) return c.json({ error: "validation_error", message: "Enter the invitation token and your full name." }, 400);
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(inviteToken));
+  const tokenHash = Array.from(new Uint8Array(digest), b => b.toString(16).padStart(2, "0")).join("");
+  const { data, error } = await supabase.rpc("redeem_first_admin_invite", {
+    p_actor: authData.user.id, p_token_hash: tokenHash, p_display_name: displayName
+  });
+  if (error) {
+    const forbidden = error.code === "42501";
+    return c.json({ error: "invitation_rejected", message: forbidden ? "This invitation belongs to a different email address." : "The invitation is invalid, expired, or has already been used." }, forbidden ? 403 : 400);
+  }
+  const row = Array.isArray(data) ? data[0] : data;
+  return c.json({ redeemed: true, institutionId: row?.institution_id, message: "Your institution administrator access has been activated." });
+});
+
 app.get("/api/v1/platform/partner-applications", async (c) => {
   const access = await requirePlatformOperator(c);
   if ("error" in access) return c.json({ error: access.error, message: access.error === "forbidden" ? "Platform operator access is required." : "Please sign in again." }, access.error === "forbidden" ? 403 : 401);
