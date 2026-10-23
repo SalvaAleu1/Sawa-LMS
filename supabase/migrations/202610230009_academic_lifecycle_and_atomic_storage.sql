@@ -63,3 +63,7 @@ as $$
 $$;
 revoke all on function public.verify_certificate(text) from public, anon, authenticated;
 grant execute on function public.verify_certificate(text) to service_role;
+
+-- Assessment-linked grades are idempotent when an assessment is submitted or regraded.
+create unique index if not exists grades_assessment_result_unique
+  on public.grades(institution_id, learner_id, course_id, assessment_id);
