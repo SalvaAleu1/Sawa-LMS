@@ -4,5 +4,14 @@ compatibility_date = "2025-01-09"
 workers_dev = true
 
 [vars]
-APP_ENV = "development"
-# Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY as Worker secrets, never commit secrets.
+APP_ENV = "production"
+# Set APP_BASE_URL to the exact deployed frontend origin.
+# Configure SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, RESEND_API_KEY and RESEND_FROM as Worker secrets.
+# Create a private R2 bucket named sawalearn-files and bind it below.
+
+[[r2_buckets]]
+binding = "R2_BUCKET"
+bucket_name = "sawalearn-files"
+
+[triggers]
+crons = ["17 2 * * *"]

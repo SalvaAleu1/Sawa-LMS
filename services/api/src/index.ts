@@ -247,6 +247,44 @@ app.patch("/api/v1/platform/partner-applications/:id", async (c) => {
   return c.json({ application: data, auditRecorded: !auditError });
 });
 
+
+app.get("/api/v1/platform/subscriptions", async (c) => {
+ const access=await requirePlatformOperator(c);
+ if ("error" in access) return c.json({error:access.error,message:"Platform operator access is required."},access.error==="forbidden"?403:401);
+ const {data,error}=await access.supabase.from("institution_subscriptions").select("id,institution_id,status,billing_period,period_start,period_end,grace_end,owner_decision_required,extended_until,created_at,institutions(display_name,slug),subscription_plans(code,name,monthly_price,annual_price,currency,max_active_users,storage_limit_bytes),cash_receipts(receipt_number,amount,currency,received_on,confirmed_at)").order("period_end",{ascending:true}).limit(300);
+ if(error){console.error("Subscription list failed",{code:error.code});return c.json({error:"read_failed",message:"Could not load subscriptions."},500);}
+ return c.json({subscriptions:data||[]});
+});
+
+app.post("/api/v1/platform/subscriptions/:id/receipt", async (c) => {
+ const access=await requirePlatformOperator(c);
+ if ("error" in access) return c.json({error:access.error,message:"Platform operator access is required."},access.error==="forbidden"?403:401);
+ const id=c.req.param("id");
+ if(!/^[0-9a-f-]{36}$/i.test(id))return c.json({error:"validation_error",message:"Invalid subscription reference."},400);
+ let body:Record<string,unknown>;try{body=await c.req.json<Record<string,unknown>>();}catch{return c.json({error:"invalid_json",message:"Submit a valid cash receipt."},400);}
+ const amount=Number(body.amount),currency=clean(body.currency,3).toUpperCase(),period=clean(body.period,20);
+ const receivedOn=clean(body.receivedOn,10),coveredFrom=clean(body.coveredFrom,10),coveredUntil=clean(body.coveredUntil,10);
+ if(!Number.isFinite(amount)||amount<=0||!/^[A-Z]{3}$/.test(currency)||!["monthly","annual"].includes(period)||![receivedOn,coveredFrom,coveredUntil].every(x=>/^\d{4}-\d{2}-\d{2}$/.test(x))||coveredUntil<coveredFrom)return c.json({error:"validation_error",message:"Provide a positive amount, currency, billing period and valid receipt dates."},400);
+ const {data:sub,error:subError}=await access.supabase.from("institution_subscriptions").select("institution_id").eq("id",id).maybeSingle();
+ if(subError||!sub)return c.json({error:"not_found",message:"Subscription not found."},404);
+ const {data,error}=await access.supabase.rpc("platform_record_cash_receipt",{p_actor:access.user.id,p_institution:sub.institution_id,p_subscription:id,p_amount:amount,p_currency:currency,p_received_on:receivedOn,p_period:period,p_covered_from:coveredFrom,p_covered_until:coveredUntil,p_exchange_rate:body.exchangeRate?Number(body.exchangeRate):null,p_reference:clean(body.reference,120)||null,p_notes:clean(body.notes,1000)||null,p_confirm:body.confirm===true});
+ if(error){console.error("Cash receipt operation failed",{code:error.code});return c.json({error:"receipt_failed",message:"The receipt could not be recorded. Check the subscription and receipt dates."},400);}
+ return c.json({recorded:true,receiptNumber:data,confirmed:body.confirm===true},201);
+});
+
+app.post("/api/v1/platform/subscriptions/:id/action", async (c) => {
+ const access=await requirePlatformOperator(c);
+ if ("error" in access) return c.json({error:access.error,message:"Platform operator access is required."},access.error==="forbidden"?403:401);
+ const id=c.req.param("id");
+ if(!/^[0-9a-f-]{36}$/i.test(id))return c.json({error:"validation_error",message:"Invalid subscription reference."},400);
+ let body:Record<string,unknown>;try{body=await c.req.json<Record<string,unknown>>();}catch{return c.json({error:"invalid_json",message:"Submit a valid subscription action."},400);}
+ const action=clean(body.action,30),until=clean(body.extendUntil,10),reason=clean(body.reason,1000);
+ if(!["extend","terminate","restore_overdue"].includes(action)||(action==="extend"&&!/^\d{4}-\d{2}-\d{2}$/.test(until)))return c.json({error:"validation_error",message:"Choose a valid owner action and provide an extension date when extending."},400);
+ const {data,error}=await access.supabase.rpc("platform_manage_subscription",{p_actor:access.user.id,p_subscription:id,p_action:action,p_extend_until:action==="extend"?until:null,p_reason:reason});
+ if(error){const status=error.code==="42501"?403:error.code==="P0002"?404:400;return c.json({error:"subscription_action_failed",message:status===403?"Only the platform owner can perform this action.":"The subscription action could not be completed."},status);}
+ return c.json({updated:true,subscription:data});
+});
+
 app.notFound((c) => c.json({ error: "not_found", message: "The requested resource was not found." }, 404));
 app.onError((error, c) => {
   console.error("SawaLearn API request failed", { message: error.message, path: c.req.path });
