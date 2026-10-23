@@ -459,6 +459,33 @@ app.post("/api/v1/institution/members/:membershipId/activate",async(c)=>{
  return c.json({activated:true,membership:updated});
 });
 
+
+app.post("/api/v1/institution/results/:id/action",async(c)=>{
+ const a=await requireSignedIn(c);if("error" in a)return c.json({error:"unauthorized",message:"Sign in to manage result publication."},401);
+ const id=c.req.param("id");if(!/^[0-9a-f-]{36}$/i.test(id))return c.json({error:"validation_error",message:"Invalid result publication reference."},400);
+ let body:Record<string,unknown>;try{body=await c.req.json<Record<string,unknown>>()}catch{return c.json({error:"invalid_json",message:"Submit a valid result action."},400)}
+ const tenant=clean(body.institutionId,64),action=clean(body.action,30);
+ if(!tenant||!["submit","approve","publish"].includes(action))return c.json({error:"validation_error",message:"Choose a valid result action."},400);
+ const {data:member}=await a.supabase.from("institution_memberships").select("role").eq("institution_id",tenant).eq("user_id",a.user.id).eq("status","active").maybeSingle();
+ if(!member||!["institution_admin","staff"].includes(member.role))return c.json({error:"forbidden",message:"Institution administrator or authorized staff access is required."},403);
+ const {data:result}=await a.supabase.from("result_publications").select("id,status,title,term_id").eq("id",id).eq("institution_id",tenant).maybeSingle();
+ if(!result)return c.json({error:"not_found",message:"Result publication not found."},404);
+ const next=action==="submit"&&result.status==="draft"?"submitted_for_approval":action==="approve"&&result.status==="submitted_for_approval"?"approved":action==="publish"&&result.status==="approved"?"published":null;
+ if(!next)return c.json({error:"invalid_transition",message:"Results must move from draft to submitted, approved, then published."},409);
+ const patch:Record<string,unknown>={status:next};
+ if(action==="submit")patch.submitted_by=a.user.id;
+ if(action==="approve"){patch.approved_by=a.user.id;patch.approved_at=new Date().toISOString();}
+ if(action==="publish")patch.published_at=new Date().toISOString();
+ const {data:updated,error:updateError}=await a.supabase.from("result_publications").update(patch).eq("id",id).eq("institution_id",tenant).select("id,status,title,published_at").single();
+ if(updateError)return c.json({error:"update_failed",message:"Could not save the result publication action."},400);
+ if(action==="publish"){
+  const {error:gradesError}=await a.supabase.from("grades").update({status:"published",publication_id:id}).eq("institution_id",tenant).eq("term_id",result.term_id).in("status",["approved","submitted"]);
+  if(gradesError){console.error("Grade publication update failed",{code:gradesError.code});return c.json({error:"publication_incomplete",message:"The publication state was saved, but grade publication needs reconciliation."},500);}
+ }
+ await a.supabase.from("audit_logs").insert({actor_user_id:a.user.id,institution_id:tenant,action:"results_"+action,target_type:"result_publication",target_id:id,metadata:{previous_status:result.status,new_status:next,title:result.title}});
+ return c.json({updated:true,result:updated});
+});
+
 app.notFound((c) => c.json({ error: "not_found", message: "The requested resource was not found." }, 404));
 app.onError((error, c) => {
   console.error("SawaLearn API request failed", { message: error.message, path: c.req.path });
