@@ -9,6 +9,9 @@ type Env = {
     APP_BASE_URL?: string;
     SUPABASE_URL?: string;
     SUPABASE_SERVICE_ROLE_KEY?: string;
+    RESEND_API_KEY?: string;
+    RESEND_FROM?: string;
+    R2_BUCKET?: R2Bucket;
   };
 };
 const app = new Hono<Env>();
@@ -285,10 +288,101 @@ app.post("/api/v1/platform/subscriptions/:id/action", async (c) => {
  return c.json({updated:true,subscription:data});
 });
 
+
+async function requireSignedIn(c: Context<Env>) {
+ const authorization=c.req.header("Authorization")||"";
+ const token=authorization.startsWith("Bearer ")?authorization.slice(7):"";
+ if(!token||!c.env.SUPABASE_URL||!c.env.SUPABASE_SERVICE_ROLE_KEY)return {error:"unauthorized" as const};
+ const supabase=createClient(c.env.SUPABASE_URL,c.env.SUPABASE_SERVICE_ROLE_KEY,{auth:{persistSession:false,autoRefreshToken:false}});
+ const {data,error}=await supabase.auth.getUser(token);
+ if(error||!data.user)return {error:"unauthorized" as const};
+ return {user:data.user,supabase};
+}
+const uploadTypes=new Set(["application/pdf","text/plain","text/markdown","application/rtf","application/vnd.openxmlformats-officedocument.wordprocessingml.document","application/vnd.openxmlformats-officedocument.presentationml.presentation","application/vnd.openxmlformats-officedocument.spreadsheetml.sheet","image/jpeg","image/png","image/webp","audio/mpeg","video/mp4"]);
+
+app.post("/api/v1/storage/upload",async(c)=>{
+ const a=await requireSignedIn(c);if("error" in a)return c.json({error:"unauthorized",message:"Sign in before uploading a course resource."},401);
+ if(!c.env.R2_BUCKET)return c.json({error:"storage_unavailable",message:"File storage is not configured."},503);
+ let form:FormData;try{form=await c.req.formData()}catch{return c.json({error:"invalid_upload",message:"Submit a valid file upload."},400)}
+ const file=form.get("file"),tenant=clean(form.get("institutionId"),64),courseId=clean(form.get("courseId"),64),title=clean(form.get("title"),180);
+ if(!(file instanceof File)||!tenant||!courseId||title.length<2)return c.json({error:"validation_error",message:"Choose a course, title and file."},400);
+ if(file.size<1||file.size>20*1024*1024)return c.json({error:"file_size",message:"Files must be no larger than 20 MB."},413);
+ if(!uploadTypes.has(file.type))return c.json({error:"file_type",message:"This file type is not supported."},415);
+ const {data:member}=await a.supabase.from("institution_memberships").select("id,role").eq("institution_id",tenant).eq("user_id",a.user.id).eq("status","active").in("role",["institution_admin","lecturer","staff"]).maybeSingle();
+ if(!member)return c.json({error:"forbidden",message:"Active teaching or administrator access is required."},403);
+ const {data:sub}=await a.supabase.from("institution_subscriptions").select("status,subscription_plans(storage_limit_bytes)").eq("institution_id",tenant).in("status",["active","grace_period"]).order("created_at",{ascending:false}).limit(1).maybeSingle();
+ if(!sub)return c.json({error:"subscription_inactive",message:"An active subscription is required to upload files."},403);
+ const plan=sub.subscription_plans as unknown as {storage_limit_bytes:number}|null;
+ const {data:usage}=await a.supabase.from("storage_usage").select("used_bytes").eq("institution_id",tenant).maybeSingle();
+ const used=Number(usage?.used_bytes||0);
+ if(!plan||used+file.size>Number(plan.storage_limit_bytes))return c.json({error:"storage_limit",message:"The institution has reached its storage allowance. Contact the platform owner to change the plan."},413);
+ const {data:course}=await a.supabase.from("courses").select("id").eq("id",courseId).eq("institution_id",tenant).maybeSingle();
+ if(!course)return c.json({error:"course_not_found",message:"The selected course does not belong to this institution."},404);
+ const name=file.name.normalize("NFKC").replace(/[^a-zA-Z0-9._-]/g,"_").slice(-100)||"resource";
+ const key=tenant+"/"+courseId+"/"+crypto.randomUUID()+"-"+name;
+ await c.env.R2_BUCKET.put(key,await file.arrayBuffer(),{httpMetadata:{contentType:file.type,cacheControl:"private, no-store"},customMetadata:{institutionId:tenant,courseId,uploadedBy:a.user.id}});
+ const {error}=await a.supabase.from("learning_materials").insert({institution_id:tenant,course_id:courseId,title,description:clean(form.get("description"),1000)||null,object_key:key,content_type:file.type,size_bytes:file.size,uploaded_by:a.user.id,published:false});
+ if(error){await c.env.R2_BUCKET.delete(key);return c.json({error:"upload_failed",message:"Could not attach the file to the course."},500)}
+ const {error:usageError}=await a.supabase.from("storage_usage").upsert({institution_id:tenant,used_bytes:used+file.size,updated_at:new Date().toISOString()},{onConflict:"institution_id"});
+ if(usageError)console.error("Storage usage update failed",{code:usageError.code});
+ return c.json({uploaded:true,objectKey:key,sizeBytes:file.size},201);
+});
+
+app.get("/api/v1/storage/:materialId",async(c)=>{
+ const a=await requireSignedIn(c);if("error" in a)return c.json({error:"unauthorized",message:"Sign in to access this resource."},401);
+ if(!c.env.R2_BUCKET)return c.json({error:"storage_unavailable",message:"File storage is not configured."},503);
+ const id=c.req.param("materialId");if(!/^[0-9a-f-]{36}$/i.test(id))return c.json({error:"not_found",message:"Resource not found."},404);
+ const {data:m}=await a.supabase.from("learning_materials").select("id,institution_id,course_id,object_key,title,content_type,published").eq("id",id).maybeSingle();
+ if(!m)return c.json({error:"not_found",message:"Resource not found."},404);
+ const {data:member}=await a.supabase.from("institution_memberships").select("role").eq("institution_id",m.institution_id).eq("user_id",a.user.id).eq("status","active").maybeSingle();
+ if(!member)return c.json({error:"forbidden",message:"You do not have access to this institution."},403);
+ if(member.role==="learner"){
+  if(!m.published)return c.json({error:"forbidden",message:"This resource has not been published to learners."},403);
+  const {data:learner}=await a.supabase.from("learner_records").select("id").eq("institution_id",m.institution_id).eq("user_id",a.user.id).maybeSingle();
+  if(!learner)return c.json({error:"forbidden",message:"Your learner record is not linked to this account."},403);
+  const {data:enrolment}=await a.supabase.from("course_enrolments").select("id").eq("institution_id",m.institution_id).eq("course_id",m.course_id).eq("learner_id",learner.id).eq("status","enrolled").maybeSingle();
+  if(!enrolment)return c.json({error:"forbidden",message:"You must be enrolled in this course."},403);
+ }
+ const object=await c.env.R2_BUCKET.get(m.object_key);if(!object)return c.json({error:"not_found",message:"Stored file not found."},404);
+ return new Response(object.body,{headers:{"Content-Type":m.content_type||"application/octet-stream","Content-Disposition":'attachment; filename="'+clean(m.title,120).replace(/["\\\\]/g,"")+'"',"Cache-Control":"private, no-store","X-Content-Type-Options":"nosniff"}});
+});
+
+async function runScheduledTasks(env:Env["Bindings"]){
+ if(!env.SUPABASE_URL||!env.SUPABASE_SERVICE_ROLE_KEY)throw new Error("Supabase Worker secrets are required");
+ const db=createClient(env.SUPABASE_URL,env.SUPABASE_SERVICE_ROLE_KEY,{auth:{persistSession:false,autoRefreshToken:false}});
+ const today=new Date().toISOString().slice(0,10),soon=new Date(Date.now()+7*86400000).toISOString().slice(0,10);
+ const {data:subs,error}=await db.from("institution_subscriptions").select("id,institution_id,status,period_end,grace_end").in("status",["active","grace_period","overdue"]).lte("period_end",soon);
+ if(error)throw error;
+ for(const s of subs||[]){
+  const end=String(s.period_end);
+  if(end===soon||end===today){
+   const {data:admins}=await db.from("institution_memberships").select("user_id,profiles(email)").eq("institution_id",s.institution_id).eq("role","institution_admin").eq("status","active");
+   for(const a of admins||[]){
+    const profile=a.profiles as unknown as {email?:string}|null;if(!profile?.email)continue;
+    const key="renewal:"+s.id+":"+end+":"+a.user_id;
+    await db.from("notifications").upsert({institution_id:s.institution_id,recipient_user_id:a.user_id,channel:"email",template_key:"subscription_renewal_reminder",payload:{to:profile.email,subject:"SawaLearn subscription renewal",text:"Your institution subscription ends on "+end+". Contact the platform owner to record and confirm renewal."},scheduled_at:new Date().toISOString(),status:"queued",idempotency_key:key},{onConflict:"idempotency_key",ignoreDuplicates:true});
+   }
+  }
+  if(String(s.grace_end)<today&&s.status!=="overdue"){
+   await db.from("institution_subscriptions").update({status:"overdue",owner_decision_required:true,updated_at:new Date().toISOString()}).eq("id",s.id);
+   await db.from("audit_logs").insert({institution_id:s.institution_id,action:"subscription_overdue_owner_decision_required",target_type:"institution_subscription",target_id:s.id,metadata:{period_end:s.period_end,grace_end:s.grace_end}});
+  }
+ }
+ if(env.RESEND_API_KEY&&env.RESEND_FROM){
+  const {data:queue}=await db.from("notifications").select("id,payload,attempts").eq("channel","email").eq("status","queued").lte("scheduled_at",new Date().toISOString()).order("scheduled_at").limit(50);
+  for(const n of queue||[]){
+   const {data:claimed}=await db.from("notifications").update({status:"sending",attempts:Number(n.attempts||0)+1}).eq("id",n.id).eq("status","queued").select("id").maybeSingle();if(!claimed)continue;
+   const p=n.payload as {to?:string;subject?:string;text?:string};
+   try{const res=await fetch("https://api.resend.com/emails",{method:"POST",headers:{"Authorization":"Bearer "+env.RESEND_API_KEY,"Content-Type":"application/json"},body:JSON.stringify({from:env.RESEND_FROM,to:p.to,subject:p.subject,text:p.text})});if(!res.ok)throw new Error("Resend status "+res.status);await db.from("notifications").update({status:"sent",sent_at:new Date().toISOString(),last_error:null}).eq("id",n.id)}
+   catch(e){const tries=Number(n.attempts||0)+1;await db.from("notifications").update({status:tries>=5?"failed":"queued",scheduled_at:new Date(Date.now()+Math.min(360,2**tries*5)*60000).toISOString(),last_error:String(e).slice(0,500)}).eq("id",n.id)}
+  }
+ }
+}
+
 app.notFound((c) => c.json({ error: "not_found", message: "The requested resource was not found." }, 404));
 app.onError((error, c) => {
   console.error("SawaLearn API request failed", { message: error.message, path: c.req.path });
   return c.json({ error: "internal_error", message: "An unexpected error occurred." }, 500);
 });
 
-export default app;
+export default { fetch: app.fetch, scheduled(_event: ScheduledController, env: Env["Bindings"], ctx: ExecutionContext) { ctx.waitUntil(runScheduledTasks(env)); } };
