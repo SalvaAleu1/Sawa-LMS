@@ -11,3 +11,6 @@ create table auth.users (
 create or replace function auth.uid()
 returns uuid language sql stable
 as $$ select nullif(current_setting('request.jwt.claim.sub', true), '')::uuid $$;
+alter default privileges in schema public grant select, insert, update, delete on tables to authenticated;
+alter default privileges in schema public grant usage, select on sequences to authenticated;
+grant usage on schema public to anon, authenticated, service_role;

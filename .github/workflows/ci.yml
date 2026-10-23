@@ -72,3 +72,6 @@ jobs:
             end if;
           end $$;
           SQL
+
+      - name: Verify tenant privacy and cross-tenant foreign keys
+        run: psql -v ON_ERROR_STOP=1 -f tests/database/rls-smoke.sql
