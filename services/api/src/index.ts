@@ -1,5 +1,5 @@
 import { createClient } from "@supabase/supabase-js";
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
 import { cors } from "hono/cors";
 import { secureHeaders } from "hono/secure-headers";
 
@@ -112,7 +112,73 @@ app.post("/api/v1/partner-applications", async (c) => {
   }, 201);
 });
 
-app.notFound((c) => c.json({ error: "not_found", message: "The requested resource was not found." }, 404));
+
+async function requirePlatformOperator(c: Context<Env>) {
+  const authorization = c.req.header("Authorization") || "";
+  const token = authorization.startsWith("Bearer ") ? authorization.slice(7) : "";
+  const url = c.env.SUPABASE_URL;
+  const key = c.env.SUPABASE_SERVICE_ROLE_KEY;
+  if (!token || !url || !key) return { error: "unauthorized" as const };
+  const supabase = createClient(url, key, { auth: { persistSession: false, autoRefreshToken: false } });
+  const { data: authData, error: authError } = await supabase.auth.getUser(token);
+  if (authError || !authData.user) return { error: "unauthorized" as const };
+  const { data: membership, error: membershipError } = await supabase
+    .from("platform_memberships").select("role")
+    .eq("user_id", authData.user.id).in("role", ["platform_owner", "platform_admin"]).limit(1).maybeSingle();
+  if (membershipError || !membership) return { error: "forbidden" as const };
+  const profileName = clean(authData.user.user_metadata?.full_name, 120) || authData.user.email || "Platform operator";
+  await supabase.from("profiles").upsert({
+    id: authData.user.id, display_name: profileName, email: authData.user.email || null
+  }, { onConflict: "id", ignoreDuplicates: true });
+  return { user: authData.user, supabase };
+}
+
+app.get("/api/v1/platform/partner-applications", async (c) => {
+  const access = await requirePlatformOperator(c);
+  if ("error" in access) return c.json({ error: access.error, message: access.error === "forbidden" ? "Platform operator access is required." : "Please sign in again." }, access.error === "forbidden" ? 403 : 401);
+  const status = c.req.query("status") || "pending_review";
+  if (!["pending_review", "under_review", "approved", "rejected", "withdrawn"].includes(status)) return c.json({ error: "validation_error", message: "Invalid application status filter." }, 400);
+  const { data, error } = await access.supabase.from("partner_applications")
+    .select("id, legal_name, display_name, institution_type, country_code, contact_name, contact_email, contact_phone, website, estimated_learners, message, status, created_at, reviewed_at, review_notes")
+    .eq("status", status).order("created_at", { ascending: true }).limit(100);
+  if (error) {
+    console.error("Partner application queue read failed", { code: error.code });
+    return c.json({ error: "read_failed", message: "Could not load the review queue." }, 500);
+  }
+  return c.json({ applications: data || [] });
+});
+
+app.patch("/api/v1/platform/partner-applications/:id", async (c) => {
+  const access = await requirePlatformOperator(c);
+  if ("error" in access) return c.json({ error: access.error, message: access.error === "forbidden" ? "Platform operator access is required." : "Please sign in again." }, access.error === "forbidden" ? 403 : 401);
+  const id = c.req.param("id");
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id)) return c.json({ error: "validation_error", message: "Invalid application reference." }, 400);
+  let body: Record<string, unknown>;
+  try { body = await c.req.json<Record<string, unknown>>(); }
+  catch { return c.json({ error: "invalid_json", message: "Submit a valid review action." }, 400); }
+  const status = clean(body.status, 30);
+  const reviewNotes = clean(body.reviewNotes, 1000);
+  if (!["under_review", "rejected"].includes(status)) return c.json({ error: "invalid_transition", message: "Only 'under review' or 'rejected' can be set here. Approval requires the secure tenant and administrator-invitation workflow." }, 400);
+  const { data: previous, error: readError } = await access.supabase.from("partner_applications")
+    .select("id, status, legal_name").eq("id", id).maybeSingle();
+  if (readError || !previous) return c.json({ error: "not_found", message: "Partner application not found." }, 404);
+  const { data, error } = await access.supabase.from("partner_applications")
+    .update({ status, review_notes: reviewNotes || null, reviewed_by: access.user.id, reviewed_at: new Date().toISOString() })
+    .eq("id", id).select("id, status, reviewed_at").single();
+  if (error) {
+    console.error("Partner application review update failed", { code: error.code });
+    return c.json({ error: "update_failed", message: "Could not save the review decision." }, 500);
+  }
+  const { error: auditError } = await access.supabase.from("audit_logs").insert({
+    actor_user_id: access.user.id,
+    action: status === "rejected" ? "partner_application_rejected" : "partner_application_marked_under_review",
+    target_type: "partner_application", target_id: id,
+    metadata: { previous_status: previous.status, new_status: status, institution_name: previous.legal_name }
+  });
+  if (auditError) console.error("Partner review audit write failed", { code: auditError.code });
+  return c.json({ application: data, auditRecorded: !auditError });
+});
+\napp.notFound((c) => c.json({ error: "not_found", message: "The requested resource was not found." }, 404));
 app.onError((error, c) => {
   console.error("SawaLearn API request failed", { message: error.message, path: c.req.path });
   return c.json({ error: "internal_error", message: "An unexpected error occurred." }, 500);
