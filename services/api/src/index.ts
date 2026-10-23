@@ -605,6 +605,49 @@ app.post("/api/v1/assessments/submissions/:submissionId/grade",async(c)=>{
 });
 
 
+
+app.post("/api/v1/assignments/:id/submissions",async(c)=>{
+ const a=await requireSignedIn(c);if("error" in a)return c.json({error:"unauthorized"},401);
+ const assignmentId=c.req.param("id");let body:Record<string,unknown>;try{body=await c.req.json<Record<string,unknown>>()}catch{return c.json({error:"invalid_json"},400)}
+ const tenant=clean(body.institutionId,64),submissionText=clean(body.submissionText,30000);
+ if(!validUuid(assignmentId)||!validUuid(tenant)||submissionText.length<1)return c.json({error:"validation_error",message:"Write your assignment response before submitting."},400);
+ const member=await requireInstitutionRole(a,tenant,["learner"]);if(!member)return c.json({error:"forbidden"},403);
+ const {data:learner}=await a.supabase.from("learner_records").select("id").eq("institution_id",tenant).eq("user_id",a.user.id).maybeSingle();
+ const {data:assignment}=await a.supabase.from("assignments").select("id,course_id,published,due_at,max_score").eq("id",assignmentId).eq("institution_id",tenant).maybeSingle();
+ if(!learner||!assignment||!assignment.published)return c.json({error:"assignment_unavailable",message:"A published assignment and linked learner record are required."},403);
+ if(assignment.due_at&&Date.now()>new Date(assignment.due_at).getTime())return c.json({error:"assignment_closed",message:"The assignment deadline has passed."},409);
+ const {data:enrolment}=await a.supabase.from("course_enrolments").select("id").eq("institution_id",tenant).eq("course_id",assignment.course_id).eq("learner_id",learner.id).eq("status","enrolled").maybeSingle();if(!enrolment)return c.json({error:"not_enrolled"},403);
+ const {data:existing}=await a.supabase.from("assignment_submissions").select("id,status").eq("institution_id",tenant).eq("assignment_id",assignmentId).eq("learner_id",learner.id).maybeSingle();
+ if(existing)return c.json({error:"already_submitted",message:"This assignment has already been submitted. Contact your lecturer if a correction is required."},409);
+ const {data,error}=await a.supabase.from("assignment_submissions").insert({institution_id:tenant,assignment_id:assignmentId,learner_id:learner.id,submission_text:submissionText,status:"submitted"}).select("id,status,submitted_at").single();
+ if(error)return c.json({error:"submission_failed",message:"The assignment submission could not be saved."},400);
+ return c.json({submission:data},201);
+});
+app.get("/api/v1/assignments/:id/submissions",async(c)=>{
+ const a=await requireSignedIn(c);if("error" in a)return c.json({error:"unauthorized"},401);
+ const assignmentId=c.req.param("id"),tenant=clean(c.req.query("institutionId"),64);if(!validUuid(assignmentId)||!validUuid(tenant))return c.json({error:"validation_error"},400);
+ const member=await requireInstitutionRole(a,tenant,["institution_admin","staff","lecturer"]);if(!member)return c.json({error:"forbidden"},403);
+ const {data:assignment}=await a.supabase.from("assignments").select("id,course_id,max_score").eq("id",assignmentId).eq("institution_id",tenant).maybeSingle();if(!assignment)return c.json({error:"not_found"},404);
+ if(member.role==="lecturer"){const {data:course}=await a.supabase.from("courses").select("id").eq("id",assignment.course_id).eq("lecturer_membership_id",member.id).maybeSingle();if(!course)return c.json({error:"forbidden"},403);}
+ const {data,error}=await a.supabase.from("assignment_submissions").select("id,learner_id,submission_text,status,submitted_at,score,feedback,learner_records(first_name,last_name,learner_number)").eq("institution_id",tenant).eq("assignment_id",assignmentId).order("submitted_at");
+ if(error)return c.json({error:"submissions_read_failed"},500);
+ return c.json({assignment,submissions:data||[]});
+});
+app.post("/api/v1/assignments/submissions/:submissionId/grade",async(c)=>{
+ const a=await requireSignedIn(c);if("error" in a)return c.json({error:"unauthorized"},401);
+ const id=c.req.param("submissionId");let body:Record<string,unknown>;try{body=await c.req.json<Record<string,unknown>>()}catch{return c.json({error:"invalid_json"},400)}
+ const tenant=clean(body.institutionId,64),score=Number(body.score),feedback=clean(body.feedback,3000);
+ if(!validUuid(id)||!validUuid(tenant)||!Number.isFinite(score)||score<0)return c.json({error:"validation_error"},400);
+ const member=await requireInstitutionRole(a,tenant,["institution_admin","staff","lecturer"]);if(!member)return c.json({error:"forbidden"},403);
+ const {data:submission}=await a.supabase.from("assignment_submissions").select("id,assignment_id,learner_id,assignments(course_id,max_score)").eq("id",id).eq("institution_id",tenant).maybeSingle();if(!submission)return c.json({error:"not_found"},404);
+ const assignment=submission.assignments as unknown as {course_id:string;max_score:number};
+ if(score>Number(assignment.max_score))return c.json({error:"score_too_high",message:"Score cannot exceed the assignment maximum."},400);
+ if(member.role==="lecturer"){const {data:course}=await a.supabase.from("courses").select("id").eq("id",assignment.course_id).eq("lecturer_membership_id",member.id).maybeSingle();if(!course)return c.json({error:"forbidden"},403);}
+ const {data:updated,error}=await a.supabase.from("assignment_submissions").update({score,feedback,status:"graded",graded_by:a.user.id,graded_at:new Date().toISOString()}).eq("id",id).eq("institution_id",tenant).select("id,score,feedback,status,graded_at").single();
+ if(error)return c.json({error:"grading_failed"},400);
+ return c.json({submission:updated});
+});
+
 app.post("/api/v1/grades/:id/action",async(c)=>{
  const a=await requireSignedIn(c);if("error" in a)return c.json({error:"unauthorized"},401);
  const id=c.req.param("id");let body:Record<string,unknown>;try{body=await c.req.json<Record<string,unknown>>()}catch{return c.json({error:"invalid_json"},400)}
