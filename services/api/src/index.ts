@@ -313,18 +313,22 @@ app.post("/api/v1/storage/upload",async(c)=>{
  const {data:sub}=await a.supabase.from("institution_subscriptions").select("status,subscription_plans(storage_limit_bytes)").eq("institution_id",tenant).in("status",["active","grace_period"]).order("created_at",{ascending:false}).limit(1).maybeSingle();
  if(!sub)return c.json({error:"subscription_inactive",message:"An active subscription is required to upload files."},403);
  const plan=sub.subscription_plans as unknown as {storage_limit_bytes:number}|null;
- const {data:usage}=await a.supabase.from("storage_usage").select("used_bytes").eq("institution_id",tenant).maybeSingle();
- const used=Number(usage?.used_bytes||0);
- if(!plan||used+file.size>Number(plan.storage_limit_bytes))return c.json({error:"storage_limit",message:"The institution has reached its storage allowance. Contact the platform owner to change the plan."},413);
+ if(!plan)return c.json({error:"storage_limit",message:"The institution's storage plan could not be verified."},403);
+ const {data:reserved,error:reserveError}=await a.supabase.rpc("adjust_storage_usage",{p_institution_id:tenant,p_delta:file.size,p_limit:Number(plan.storage_limit_bytes)});
+ if(reserveError||reserved===null)return c.json({error:"storage_limit",message:"The institution has reached its storage allowance. Contact the platform owner to change the plan."},413);
  const {data:course}=await a.supabase.from("courses").select("id").eq("id",courseId).eq("institution_id",tenant).maybeSingle();
  if(!course)return c.json({error:"course_not_found",message:"The selected course does not belong to this institution."},404);
  const name=file.name.normalize("NFKC").replace(/[^a-zA-Z0-9._-]/g,"_").slice(-100)||"resource";
  const key=tenant+"/"+courseId+"/"+crypto.randomUUID()+"-"+name;
- await c.env.R2_BUCKET.put(key,await file.arrayBuffer(),{httpMetadata:{contentType:file.type,cacheControl:"private, no-store"},customMetadata:{institutionId:tenant,courseId,uploadedBy:a.user.id}});
- const {error}=await a.supabase.from("learning_materials").insert({institution_id:tenant,course_id:courseId,title,description:clean(form.get("description"),1000)||null,object_key:key,content_type:file.type,size_bytes:file.size,uploaded_by:a.user.id,published:false});
- if(error){await c.env.R2_BUCKET.delete(key);return c.json({error:"upload_failed",message:"Could not attach the file to the course."},500)}
- const {error:usageError}=await a.supabase.from("storage_usage").upsert({institution_id:tenant,used_bytes:used+file.size,updated_at:new Date().toISOString()},{onConflict:"institution_id"});
- if(usageError)console.error("Storage usage update failed",{code:usageError.code});
+ try {
+  await c.env.R2_BUCKET.put(key,await file.arrayBuffer(),{httpMetadata:{contentType:file.type,cacheControl:"private, no-store"},customMetadata:{institutionId:tenant,courseId,uploadedBy:a.user.id}});
+  const {error}=await a.supabase.from("learning_materials").insert({institution_id:tenant,course_id:courseId,title,description:clean(form.get("description"),1000)||null,object_key:key,content_type:file.type,size_bytes:file.size,uploaded_by:a.user.id,published:false});
+  if(error){await c.env.R2_BUCKET.delete(key);await a.supabase.rpc("adjust_storage_usage",{p_institution_id:tenant,p_delta:-file.size,p_limit:Number(plan.storage_limit_bytes)});return c.json({error:"upload_failed",message:"Could not attach the file to the course."},500)}
+ } catch (error) {
+  await a.supabase.rpc("adjust_storage_usage",{p_institution_id:tenant,p_delta:-file.size,p_limit:Number(plan.storage_limit_bytes)});
+  console.error("Storage write failed",{message:error instanceof Error?error.message:"unknown"});
+  return c.json({error:"upload_failed",message:"The file could not be stored. Storage reservation was released."},500);
+ }
  return c.json({uploaded:true,objectKey:key,sizeBytes:file.size},201);
 });
 
@@ -470,6 +474,16 @@ app.post("/api/v1/institution/results/:id/action",async(c)=>{
  if(!member||!["institution_admin","staff"].includes(member.role))return c.json({error:"forbidden",message:"Institution administrator or authorized staff access is required."},403);
  const {data:result}=await a.supabase.from("result_publications").select("id,status,title,term_id").eq("id",id).eq("institution_id",tenant).maybeSingle();
  if(!result)return c.json({error:"not_found",message:"Result publication not found."},404);
+ if(action==="submit"&&result.status==="draft"){
+  const {data:pendingGrades,error:pendingError}=await a.supabase.from("grades").select("id,status").eq("institution_id",tenant).eq("term_id",result.term_id).not("status","in",'("approved","published")').limit(1);
+  if(pendingError)return c.json({error:"grade_check_failed",message:"Could not validate grades before submission."},500);
+  if(pendingGrades?.length)return c.json({error:"grades_pending",message:"Approve all grades for this term before submitting results for approval."},409);
+ }
+ if(action==="publish"&&result.status==="approved"){
+  const {data:pendingGrades,error:pendingError}=await a.supabase.from("grades").select("id,status").eq("institution_id",tenant).eq("term_id",result.term_id).neq("status","approved").neq("status","published").limit(1);
+  if(pendingError)return c.json({error:"grade_check_failed",message:"Could not validate grades before publication."},500);
+  if(pendingGrades?.length)return c.json({error:"grades_pending",message:"All grades must be approved before results can be published."},409);
+ }
  const next=action==="submit"&&result.status==="draft"?"submitted_for_approval":action==="approve"&&result.status==="submitted_for_approval"?"approved":action==="publish"&&result.status==="approved"?"published":null;
  if(!next)return c.json({error:"invalid_transition",message:"Results must move from draft to submitted, approved, then published."},409);
  const patch:Record<string,unknown>={status:next};
@@ -484,6 +498,134 @@ app.post("/api/v1/institution/results/:id/action",async(c)=>{
  }
  await a.supabase.from("audit_logs").insert({actor_user_id:a.user.id,institution_id:tenant,action:"results_"+action,target_type:"result_publication",target_id:id,metadata:{previous_status:result.status,new_status:next,title:result.title}});
  return c.json({updated:true,result:updated});
+});
+
+
+const validUuid=(value:string)=>/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
+async function requireInstitutionRole(a:{user:{id:string};supabase:ReturnType<typeof createClient>}, institutionId:string, roles:string[]) {
+ const {data}=await a.supabase.from("institution_memberships").select("id,role").eq("institution_id",institutionId).eq("user_id",a.user.id).eq("status","active").maybeSingle();
+ return data && roles.includes(data.role) ? data : null;
+}
+
+app.post("/api/v1/assessments/:id/questions",async(c)=>{
+ const a=await requireSignedIn(c);if("error" in a)return c.json({error:"unauthorized"},401);
+ const assessmentId=c.req.param("id");if(!validUuid(assessmentId))return c.json({error:"validation_error",message:"Invalid assessment reference."},400);
+ let body:Record<string,unknown>;try{body=await c.req.json<Record<string,unknown>>()}catch{return c.json({error:"invalid_json"},400)}
+ const tenant=clean(body.institutionId,64),prompt=clean(body.prompt,4000),type=clean(body.questionType,30),points=Number(body.points||1);
+ if(!validUuid(tenant)||prompt.length<2||!["single_choice","multiple_choice","short_answer","essay","numeric"].includes(type)||!Number.isFinite(points)||points<=0)return c.json({error:"validation_error",message:"Provide a question, valid type and positive points."},400);
+ const member=await requireInstitutionRole(a,tenant,["institution_admin","staff","lecturer"]);if(!member)return c.json({error:"forbidden",message:"Teaching or administrator access is required."},403);
+ const {data:assessment}=await a.supabase.from("assessments").select("id,published,course_id").eq("id",assessmentId).eq("institution_id",tenant).maybeSingle();
+ if(!assessment)return c.json({error:"not_found",message:"Assessment not found."},404);
+ if(member.role==="lecturer"){const {data:course}=await a.supabase.from("courses").select("id").eq("id",assessment.course_id).eq("lecturer_membership_id",member.id).maybeSingle();if(!course)return c.json({error:"forbidden",message:"You are not assigned to this course."},403);}
+ if(assessment.published)return c.json({error:"assessment_locked",message:"Unpublish the assessment before changing its questions."},409);
+ const options=Array.isArray(body.options)?body.options.slice(0,10).map((o)=>clean(o,500)): [];
+ if(["single_choice","multiple_choice"].includes(type)&&options.length<2)return c.json({error:"validation_error",message:"Choice questions require at least two options."},400);
+ const answerKey=body.answerKey;
+ if(type==="single_choice"&&(!Number.isInteger(Number(answerKey))||Number(answerKey)<0||Number(answerKey)>=options.length))return c.json({error:"validation_error",message:"The correct option must refer to an available option."},400);
+ if(type==="multiple_choice"&&(!Array.isArray(answerKey)||!answerKey.length||answerKey.some((v)=>!Number.isInteger(Number(v))||Number(v)<0||Number(v)>=options.length)))return c.json({error:"validation_error",message:"Select one or more valid correct options."},400);
+ const {data:last}=await a.supabase.from("assessment_questions").select("position").eq("assessment_id",assessmentId).order("position",{ascending:false}).limit(1).maybeSingle();
+ const {data,error}=await a.supabase.from("assessment_questions").insert({institution_id:tenant,assessment_id:assessmentId,position:Number(last?.position||0)+1,question_type:type,prompt,options,answer_key:answerKey??null,points}).select("id,position,question_type,prompt,options,points").single();
+ if(error)return c.json({error:"question_save_failed",message:"Could not save the assessment question."},400);
+ return c.json({question:data},201);
+});
+
+app.get("/api/v1/assessments/:id/questions",async(c)=>{
+ const a=await requireSignedIn(c);if("error" in a)return c.json({error:"unauthorized"},401);
+ const assessmentId=c.req.param("id"),tenant=clean(c.req.query("institutionId"),64);if(!validUuid(assessmentId)||!validUuid(tenant))return c.json({error:"validation_error"},400);
+ const member=await requireInstitutionRole(a,tenant,["institution_admin","staff","lecturer","learner"]);if(!member)return c.json({error:"forbidden"},403);
+ const {data:assessment}=await a.supabase.from("assessments").select("id,published,course_id,starts_at,ends_at").eq("id",assessmentId).eq("institution_id",tenant).maybeSingle();
+ if(!assessment)return c.json({error:"not_found"},404);
+ if(member.role==="learner"){
+  if(!assessment.published)return c.json({error:"not_available",message:"This assessment is not published."},403);
+  const {data:lr}=await a.supabase.from("learner_records").select("id").eq("institution_id",tenant).eq("user_id",a.user.id).maybeSingle();
+  if(!lr)return c.json({error:"learner_record_missing"},403);
+  const {data:enrolment}=await a.supabase.from("course_enrolments").select("id").eq("institution_id",tenant).eq("course_id",assessment.course_id).eq("learner_id",lr.id).eq("status","enrolled").maybeSingle();
+  if(!enrolment)return c.json({error:"not_enrolled"},403);
+ }
+ const {data,error}=await a.supabase.from("assessment_questions").select("id,position,question_type,prompt,options,points").eq("institution_id",tenant).eq("assessment_id",assessmentId).order("position");
+ if(error)return c.json({error:"question_read_failed"},500);
+ return c.json({assessment,questions:data||[]});
+});
+
+app.post("/api/v1/assessments/:id/submissions",async(c)=>{
+ const a=await requireSignedIn(c);if("error" in a)return c.json({error:"unauthorized"},401);
+ const assessmentId=c.req.param("id");let body:Record<string,unknown>;try{body=await c.req.json<Record<string,unknown>>()}catch{return c.json({error:"invalid_json"},400)}
+ const tenant=clean(body.institutionId,64),answers=body.answers;
+ if(!validUuid(assessmentId)||!validUuid(tenant)||!answers||typeof answers!=="object"||Array.isArray(answers))return c.json({error:"validation_error",message:"Provide an assessment and answers."},400);
+ const member=await requireInstitutionRole(a,tenant,["learner"]);if(!member)return c.json({error:"forbidden",message:"Learner access is required."},403);
+ const {data:lr}=await a.supabase.from("learner_records").select("id").eq("institution_id",tenant).eq("user_id",a.user.id).maybeSingle();
+ const {data:assessment}=await a.supabase.from("assessments").select("id,published,course_id,starts_at,ends_at").eq("id",assessmentId).eq("institution_id",tenant).maybeSingle();
+ if(!lr||!assessment||!assessment.published)return c.json({error:"not_available",message:"Learner record or published assessment not found."},403);
+ const now=Date.now();if(assessment.starts_at&&now<new Date(assessment.starts_at).getTime())return c.json({error:"not_started",message:"The assessment has not started."},409);if(assessment.ends_at&&now>new Date(assessment.ends_at).getTime())return c.json({error:"closed",message:"The assessment deadline has passed."},409);
+ const {data:enrolment}=await a.supabase.from("course_enrolments").select("id").eq("institution_id",tenant).eq("course_id",assessment.course_id).eq("learner_id",lr.id).eq("status","enrolled").maybeSingle();if(!enrolment)return c.json({error:"not_enrolled"},403);
+ const {data:questions,error:qError}=await a.supabase.from("assessment_questions").select("id,question_type,answer_key,points").eq("institution_id",tenant).eq("assessment_id",assessmentId);
+ if(qError||!questions?.length)return c.json({error:"assessment_empty",message:"This assessment has no questions yet."},409);
+ const submitted=answers as Record<string,unknown>;const allowed=new Set(questions.map(q=>q.id));if(Object.keys(submitted).some(k=>!allowed.has(k)))return c.json({error:"invalid_answers",message:"Answers contain unknown question IDs."},400);
+ let score=0,autoGradable=true;const sanitized:Record<string,unknown>={};
+ for(const q of questions){const answer=submitted[q.id];if(answer===undefined)continue;sanitized[q.id]=answer;if(q.question_type==="single_choice"||q.question_type==="multiple_choice"){const expected=q.answer_key;const normalize=(v:unknown)=>JSON.stringify(Array.isArray(v)?v.map(Number).sort((x,y)=>x-y):Number(v));if(normalize(answer)===normalize(expected))score+=Number(q.points);}else autoGradable=false;}
+ const status=autoGradable?"graded":"submitted";
+ const {data,error}=await a.supabase.from("assessment_submissions").upsert({institution_id:tenant,assessment_id:assessmentId,learner_id:lr.id,answers:sanitized,score:autoGradable?score:null,status,submitted_at:new Date().toISOString()},{onConflict:"assessment_id,learner_id"}).select("id,status,score,submitted_at").single();
+ if(error)return c.json({error:"submission_failed",message:"The submission could not be saved. It may already have been submitted."},400);
+ if(autoGradable){await a.supabase.from("grades").upsert({institution_id:tenant,learner_id:lr.id,course_id:assessment.course_id,assessment_id:assessmentId,score, status:"submitted",entered_by:a.user.id},{onConflict:"institution_id,learner_id,course_id,assessment_id"});}
+ return c.json({submission:data},201);
+});
+
+app.post("/api/v1/assessments/submissions/:submissionId/grade",async(c)=>{
+ const a=await requireSignedIn(c);if("error" in a)return c.json({error:"unauthorized"},401);
+ const submissionId=c.req.param("submissionId");let body:Record<string,unknown>;try{body=await c.req.json<Record<string,unknown>>()}catch{return c.json({error:"invalid_json"},400)}
+ const tenant=clean(body.institutionId,64),score=Number(body.score),feedback=clean(body.feedback,3000);
+ if(!validUuid(submissionId)||!validUuid(tenant)||!Number.isFinite(score)||score<0)return c.json({error:"validation_error",message:"Provide a valid score and institution."},400);
+ const member=await requireInstitutionRole(a,tenant,["institution_admin","staff","lecturer"]);if(!member)return c.json({error:"forbidden"},403);
+ const {data:submission}=await a.supabase.from("assessment_submissions").select("id,assessment_id,learner_id,assessment:assessments(course_id,max_score)").eq("id",submissionId).eq("institution_id",tenant).maybeSingle();
+ if(!submission)return c.json({error:"not_found"},404);
+ const assessment=submission.assessment as unknown as {course_id:string;max_score:number};
+ if(score>Number(assessment.max_score))return c.json({error:"score_too_high",message:"Score cannot exceed the assessment maximum."},400);
+ if(member.role==="lecturer"){const {data:course}=await a.supabase.from("courses").select("id").eq("id",assessment.course_id).eq("lecturer_membership_id",member.id).maybeSingle();if(!course)return c.json({error:"forbidden",message:"You are not assigned to this course."},403);}
+ const {data:updated,error}=await a.supabase.from("assessment_submissions").update({score,status:"graded",feedback,graded_by:a.user.id,graded_at:new Date().toISOString()}).eq("id",submissionId).eq("institution_id",tenant).select("id,score,status,feedback,graded_at").single();
+ if(error)return c.json({error:"grading_failed"},400);
+ await a.supabase.from("grades").upsert({institution_id:tenant,learner_id:submission.learner_id,course_id:assessment.course_id,assessment_id:submission.assessment_id,score,status:"submitted",entered_by:a.user.id},{onConflict:"institution_id,learner_id,course_id,assessment_id"});
+ return c.json({submission:updated});
+});
+
+app.get("/api/v1/learners/:learnerId/transcript",async(c)=>{
+ const a=await requireSignedIn(c);if("error" in a)return c.json({error:"unauthorized"},401);
+ const learnerId=c.req.param("learnerId"),tenant=clean(c.req.query("institutionId"),64);if(!validUuid(learnerId)||!validUuid(tenant))return c.json({error:"validation_error"},400);
+ const member=await requireInstitutionRole(a,tenant,["institution_admin","staff","lecturer","learner"]);if(!member)return c.json({error:"forbidden"},403);
+ const {data:learner}=await a.supabase.from("learner_records").select("id,first_name,last_name,learner_number,programme_id,user_id").eq("id",learnerId).eq("institution_id",tenant).maybeSingle();if(!learner)return c.json({error:"not_found"},404);
+ if(member.role==="learner"&&learner.user_id!==a.user.id)return c.json({error:"forbidden"},403);
+ const {data:grades,error}=await a.supabase.from("grades").select("score,letter_grade,grade_points,credits,status,term_id,courses(code,title,credits),academic_terms(name,academic_years(name))").eq("institution_id",tenant).eq("learner_id",learnerId).in("status",["published"]).order("term_id");
+ if(error)return c.json({error:"transcript_failed"},500);
+ const rows=(grades||[]).map((g)=>({score:g.score,letterGrade:g.letter_grade,gradePoints:g.grade_points,credits:Number(g.credits??(g.courses as {credits?:number}|null)?.credits??0),term:g.academic_terms,course:g.courses}));
+ const totalCredits=rows.reduce((n,g)=>n+g.credits,0),weighted=rows.reduce((n,g)=>n+(Number(g.gradePoints||0)*g.credits),0);
+ return c.json({learner:{name:learner.first_name+" "+learner.last_name,learnerNumber:learner.learner_number},grades:rows,summary:{publishedCourses:rows.length,credits:totalCredits,cgpa:totalCredits?Number((weighted/totalCredits).toFixed(3)):null}});
+});
+
+app.post("/api/v1/learners/:learnerId/certificates",async(c)=>{
+ const a=await requireSignedIn(c);if("error" in a)return c.json({error:"unauthorized"},401);
+ const learnerId=c.req.param("learnerId");let body:Record<string,unknown>;try{body=await c.req.json<Record<string,unknown>>()}catch{return c.json({error:"invalid_json"},400)}
+ const tenant=clean(body.institutionId,64),type=clean(body.certificateType,80);
+ if(!validUuid(learnerId)||!validUuid(tenant)||type.length<2)return c.json({error:"validation_error"},400);
+ const member=await requireInstitutionRole(a,tenant,["institution_admin"]);if(!member)return c.json({error:"forbidden",message:"Only an institution administrator can issue certificates."},403);
+ const {data:learner}=await a.supabase.from("learner_records").select("id,first_name,last_name,learner_number").eq("id",learnerId).eq("institution_id",tenant).maybeSingle();if(!learner)return c.json({error:"not_found"},404);
+ const token=Array.from(crypto.getRandomValues(new Uint8Array(32)),b=>b.toString(16).padStart(2,"0")).join("");
+ const digest=await crypto.subtle.digest("SHA-256",new TextEncoder().encode(token));
+ const hash=Array.from(new Uint8Array(digest),b=>b.toString(16).padStart(2,"0")).join("");
+ const number=clean(body.certificateNumber,100)||("SWL-"+new Date().getUTCFullYear()+"-"+crypto.randomUUID().slice(0,8).toUpperCase());
+ const {data,error}=await a.supabase.from("certificates").insert({institution_id:tenant,learner_id:learnerId,certificate_number:number,certificate_type:type,issued_by:a.user.id,verification_token_hash:hash,metadata:{learner_number:learner.learner_number}}).select("id,certificate_number,certificate_type,issued_at").single();
+ if(error)return c.json({error:"certificate_issue_failed",message:"Certificate could not be issued. Check whether the certificate number already exists."},400);
+ await a.supabase.from("audit_logs").insert({actor_user_id:a.user.id,institution_id:tenant,action:"certificate_issued",target_type:"certificate",target_id:data.id,metadata:{learner_id:learnerId,certificate_number:number}});
+ return c.json({certificate:data,verificationToken:token,verificationUrl:"/verify/"+token,warning:"Save the verification token now. It is shown only once."},201);
+});
+
+app.get("/api/v1/certificates/verify/:token",async(c)=>{
+ const token=clean(c.req.param("token"),128);if(!/^[a-f0-9]{64}$/.test(token))return c.json({valid:false,message:"Certificate not found."},404);
+ const digest=await crypto.subtle.digest("SHA-256",new TextEncoder().encode(token));
+ const hash=Array.from(new Uint8Array(digest),b=>b.toString(16).padStart(2,"0")).join("");
+ const {data,error}=await createClient(c.env.SUPABASE_URL||"",c.env.SUPABASE_SERVICE_ROLE_KEY||"",{auth:{persistSession:false,autoRefreshToken:false}}).rpc("verify_certificate",{p_token_hash:hash});
+ if(error)return c.json({error:"verification_unavailable",message:"Certificate verification is temporarily unavailable."},503);
+ const record=Array.isArray(data)?data[0]:data;
+ if(!record)return c.json({valid:false,message:"Certificate not found."},404);
+ return c.json({certificate:record});
 });
 
 app.notFound((c) => c.json({ error: "not_found", message: "The requested resource was not found." }, 404));
