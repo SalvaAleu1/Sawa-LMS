@@ -535,7 +535,7 @@ app.get("/api/v1/assessments/:id/questions",async(c)=>{
  const a=await requireSignedIn(c);if("error" in a)return c.json({error:"unauthorized"},401);
  const assessmentId=c.req.param("id"),tenant=clean(c.req.query("institutionId"),64);if(!validUuid(assessmentId)||!validUuid(tenant))return c.json({error:"validation_error"},400);
  const member=await requireInstitutionRole(a,tenant,["institution_admin","staff","lecturer","learner"]);if(!member)return c.json({error:"forbidden"},403);
- const {data:assessment}=await a.supabase.from("assessments").select("id,published,course_id,starts_at,ends_at").eq("id",assessmentId).eq("institution_id",tenant).maybeSingle();
+ const {data:assessment}=await a.supabase.from("assessments").select("id,published,course_id,starts_at,ends_at,max_score").eq("id",assessmentId).eq("institution_id",tenant).maybeSingle();
  if(!assessment)return c.json({error:"not_found"},404);
  if(member.role==="learner"){
   if(!assessment.published)return c.json({error:"not_available",message:"This assessment is not published."},403);
@@ -565,12 +565,15 @@ app.post("/api/v1/assessments/:id/submissions",async(c)=>{
  const {data:questions,error:qError}=await a.supabase.from("assessment_questions").select("id,question_type,answer_key,points").eq("institution_id",tenant).eq("assessment_id",assessmentId);
  if(qError||!questions?.length)return c.json({error:"assessment_empty",message:"This assessment has no questions yet."},409);
  const submitted=answers as Record<string,unknown>;const allowed=new Set(questions.map(q=>q.id));if(Object.keys(submitted).some(k=>!allowed.has(k)))return c.json({error:"invalid_answers",message:"Answers contain unknown question IDs."},400);
- let score=0,autoGradable=true;const sanitized:Record<string,unknown>={};
- for(const q of questions){const answer=submitted[q.id];if(answer===undefined)continue;sanitized[q.id]=answer;if(q.question_type==="single_choice"||q.question_type==="multiple_choice"){const expected=q.answer_key;const normalize=(v:unknown)=>JSON.stringify(Array.isArray(v)?v.map(Number).sort((x,y)=>x-y):Number(v));if(normalize(answer)===normalize(expected))score+=Number(q.points);}else autoGradable=false;}
+ let rawScore=0,autoGradable=true;const sanitized:Record<string,unknown>={};
+ for(const q of questions){const answer=submitted[q.id];if(answer===undefined)continue;sanitized[q.id]=answer;if(q.question_type==="single_choice"||q.question_type==="multiple_choice"){const expected=q.answer_key;const normalize=(v:unknown)=>JSON.stringify(Array.isArray(v)?v.map(Number).sort((x,y)=>x-y):Number(v));if(normalize(answer)===normalize(expected))rawScore+=Number(q.points);}else autoGradable=false;}
+ const totalPoints=questions.reduce((n,q)=>n+Number(q.points||0),0);
+ if(totalPoints<=0||totalPoints>Number(assessment.max_score))return c.json({error:"invalid_question_points",message:"The question points must total a positive value no greater than the assessment maximum."},409);
+ const score=autoGradable?Number((rawScore*Number(assessment.max_score)/totalPoints).toFixed(2)):null;
  const status=autoGradable?"graded":"submitted";
- const {data,error}=await a.supabase.from("assessment_submissions").upsert({institution_id:tenant,assessment_id:assessmentId,learner_id:lr.id,answers:sanitized,score:autoGradable?score:null,status,submitted_at:new Date().toISOString()},{onConflict:"assessment_id,learner_id"}).select("id,status,score,submitted_at").single();
+ const {data,error}=await a.supabase.from("assessment_submissions").insert({institution_id:tenant,assessment_id:assessmentId,learner_id:lr.id,answers:sanitized,score,status,submitted_at:new Date().toISOString()}).select("id,status,score,submitted_at").single();
  if(error)return c.json({error:"submission_failed",message:"The submission could not be saved. It may already have been submitted."},400);
- if(autoGradable){await a.supabase.from("grades").upsert({institution_id:tenant,learner_id:lr.id,course_id:assessment.course_id,assessment_id:assessmentId,score, status:"submitted",entered_by:a.user.id},{onConflict:"institution_id,learner_id,course_id,assessment_id"});}
+ if(autoGradable){const {error:gradeError}=await a.supabase.from("grades").upsert({institution_id:tenant,learner_id:lr.id,course_id:assessment.course_id,assessment_id:assessmentId,score,status:"submitted",entered_by:a.user.id},{onConflict:"institution_id,learner_id,course_id,assessment_id"});if(gradeError){console.error("Auto-graded result persistence failed",{code:gradeError.code});return c.json({error:"grade_persistence_failed",message:"The submission was saved, but the grade record needs administrator review."},500);}}
  return c.json({submission:data},201);
 });
 
