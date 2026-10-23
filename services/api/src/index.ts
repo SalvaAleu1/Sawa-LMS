@@ -366,6 +366,11 @@ async function runScheduledTasks(env:Env["Bindings"]){
   if(String(s.grace_end)<today&&s.status!=="overdue"){
    await db.from("institution_subscriptions").update({status:"overdue",owner_decision_required:true,updated_at:new Date().toISOString()}).eq("id",s.id);
    await db.from("audit_logs").insert({institution_id:s.institution_id,action:"subscription_overdue_owner_decision_required",target_type:"institution_subscription",target_id:s.id,metadata:{period_end:s.period_end,grace_end:s.grace_end}});
+   const {data:owners}=await db.from("platform_memberships").select("user_id,profiles(email)").eq("role","platform_owner");
+   for(const owner of owners||[]){
+    const profile=owner.profiles as unknown as {email?:string}|null;if(!profile?.email)continue;
+    await db.from("notifications").upsert({institution_id:s.institution_id,recipient_user_id:owner.user_id,channel:"email",template_key:"subscription_owner_decision",payload:{to:profile.email,subject:"SawaLearn subscription requires an owner decision",text:"An institution subscription is past its seven-day grace period. Institution ID: "+s.institution_id+". Choose an explicit extension or termination; no automatic termination has occurred."},scheduled_at:new Date().toISOString(),status:"queued",idempotency_key:"owner-decision:"+s.id+":"+owner.user_id},{onConflict:"idempotency_key",ignoreDuplicates:true});
+   }
   }
  }
 
