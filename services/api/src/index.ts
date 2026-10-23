@@ -556,7 +556,7 @@ app.post("/api/v1/assessments/:id/submissions",async(c)=>{
  if(!validUuid(assessmentId)||!validUuid(tenant)||!answers||typeof answers!=="object"||Array.isArray(answers))return c.json({error:"validation_error",message:"Provide an assessment and answers."},400);
  const member=await requireInstitutionRole(a,tenant,["learner"]);if(!member)return c.json({error:"forbidden",message:"Learner access is required."},403);
  const {data:lr}=await a.supabase.from("learner_records").select("id").eq("institution_id",tenant).eq("user_id",a.user.id).maybeSingle();
- const {data:assessment}=await a.supabase.from("assessments").select("id,published,course_id,starts_at,ends_at").eq("id",assessmentId).eq("institution_id",tenant).maybeSingle();
+ const {data:assessment}=await a.supabase.from("assessments").select("id,published,course_id,starts_at,ends_at,max_score").eq("id",assessmentId).eq("institution_id",tenant).maybeSingle();
  if(!lr||!assessment||!assessment.published)return c.json({error:"not_available",message:"Learner record or published assessment not found."},403);
  const now=Date.now();if(assessment.starts_at&&now<new Date(assessment.starts_at).getTime())return c.json({error:"not_started",message:"The assessment has not started."},409);if(assessment.ends_at&&now>new Date(assessment.ends_at).getTime())return c.json({error:"closed",message:"The assessment deadline has passed."},409);
  const {data:enrolment}=await a.supabase.from("course_enrolments").select("id").eq("institution_id",tenant).eq("course_id",assessment.course_id).eq("learner_id",lr.id).eq("status","enrolled").maybeSingle();if(!enrolment)return c.json({error:"not_enrolled"},403);
