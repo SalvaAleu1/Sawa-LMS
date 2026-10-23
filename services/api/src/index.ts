@@ -560,6 +560,8 @@ app.post("/api/v1/assessments/:id/submissions",async(c)=>{
  if(!lr||!assessment||!assessment.published)return c.json({error:"not_available",message:"Learner record or published assessment not found."},403);
  const now=Date.now();if(assessment.starts_at&&now<new Date(assessment.starts_at).getTime())return c.json({error:"not_started",message:"The assessment has not started."},409);if(assessment.ends_at&&now>new Date(assessment.ends_at).getTime())return c.json({error:"closed",message:"The assessment deadline has passed."},409);
  const {data:enrolment}=await a.supabase.from("course_enrolments").select("id").eq("institution_id",tenant).eq("course_id",assessment.course_id).eq("learner_id",lr.id).eq("status","enrolled").maybeSingle();if(!enrolment)return c.json({error:"not_enrolled"},403);
+ const {data:existingSubmission}=await a.supabase.from("assessment_submissions").select("id,status").eq("institution_id",tenant).eq("assessment_id",assessmentId).eq("learner_id",lr.id).maybeSingle();
+ if(existingSubmission&&existingSubmission.status!=="in_progress")return c.json({error:"already_submitted",message:"This assessment has already been submitted and cannot be replaced."},409);
  const {data:questions,error:qError}=await a.supabase.from("assessment_questions").select("id,question_type,answer_key,points").eq("institution_id",tenant).eq("assessment_id",assessmentId);
  if(qError||!questions?.length)return c.json({error:"assessment_empty",message:"This assessment has no questions yet."},409);
  const submitted=answers as Record<string,unknown>;const allowed=new Set(questions.map(q=>q.id));if(Object.keys(submitted).some(k=>!allowed.has(k)))return c.json({error:"invalid_answers",message:"Answers contain unknown question IDs."},400);
