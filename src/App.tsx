@@ -1,4 +1,6 @@
 import { useState } from "react";
+import PartnerApplication from "./PartnerApplication";
+import "./partner.css";
 import { BookOpen, GraduationCap, School, Building2, Users, ClipboardCheck, CalendarDays, BarChart3, Settings, Bell, Search, ArrowUpRight, ShieldCheck, Menu, X, ChevronDown, Sparkles, FileText, CircleHelp, Layers3, Clock3 } from "lucide-react";
 
 const nav = [
@@ -23,6 +25,7 @@ function App() {
   const [menuOpen, setMenuOpen] = useState(false);
   const [search, setSearch] = useState("");
   const [showNotice, setShowNotice] = useState(true);
+  if (window.location.pathname === "/partners/apply") return <PartnerApplication />;
   return <div className="app-shell">
     <aside className={`sidebar ${menuOpen ? "sidebar-open" : ""}`}>
       <div className="sidebar-top"><Brand /><button className="icon-button mobile-close" onClick={() => setMenuOpen(false)} aria-label="Close navigation"><X size={19}/></button></div>
