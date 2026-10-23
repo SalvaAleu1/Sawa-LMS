@@ -678,7 +678,7 @@ app.get("/api/v1/learners/:learnerId/transcript",async(c)=>{
  if(member.role==="learner"&&learner.user_id!==a.user.id)return c.json({error:"forbidden"},403);
  const {data:grades,error}=await a.supabase.from("grades").select("score,letter_grade,grade_points,credits,status,term_id,courses(code,title,credits),academic_terms(name,academic_years(name))").eq("institution_id",tenant).eq("learner_id",learnerId).in("status",["published"]).order("term_id");
  if(error)return c.json({error:"transcript_failed"},500);
- const rows=(grades||[]).map((g)=>({score:g.score,letterGrade:g.letter_grade,gradePoints:g.grade_points,credits:Number(g.credits??(g.courses as {credits?:number}|null)?.credits??0),term:g.academic_terms,course:g.courses}));
+ const rows=(grades||[]).map((g)=>{const term=(Array.isArray(g.academic_terms)?g.academic_terms[0]:g.academic_terms) as unknown as {name?:string;academic_years?:unknown}|null;const course=(Array.isArray(g.courses)?g.courses[0]:g.courses) as unknown as {code?:string;title?:string;credits?:number}|null;return {score:g.score,letterGrade:g.letter_grade,gradePoints:g.grade_points,credits:Number(g.credits??course?.credits??0),term,course};});
  const totalCredits=rows.reduce((n,g)=>n+g.credits,0),weighted=rows.reduce((n,g)=>n+(Number(g.gradePoints||0)*g.credits),0);
  const termGroups=new Map<string,{term:unknown;credits:number;weighted:number;courses:number}>();
  for(const row of rows){const key=String(row.term?.name||"Unassigned");const group=termGroups.get(key)||{term:row.term,credits:0,weighted:0,courses:0};group.credits+=row.credits;group.weighted+=Number(row.gradePoints||0)*row.credits;group.courses+=1;termGroups.set(key,group);}
