@@ -178,7 +178,8 @@ app.patch("/api/v1/platform/partner-applications/:id", async (c) => {
   if (auditError) console.error("Partner review audit write failed", { code: auditError.code });
   return c.json({ application: data, auditRecorded: !auditError });
 });
-\napp.notFound((c) => c.json({ error: "not_found", message: "The requested resource was not found." }, 404));
+
+app.notFound((c) => c.json({ error: "not_found", message: "The requested resource was not found." }, 404));
 app.onError((error, c) => {
   console.error("SawaLearn API request failed", { message: error.message, path: c.req.path });
   return c.json({ error: "internal_error", message: "An unexpected error occurred." }, 500);
