@@ -570,6 +570,19 @@ app.post("/api/v1/assessments/:id/submissions",async(c)=>{
  return c.json({submission:data},201);
 });
 
+
+app.get("/api/v1/assessments/:id/submissions",async(c)=>{
+ const a=await requireSignedIn(c);if("error" in a)return c.json({error:"unauthorized"},401);
+ const assessmentId=c.req.param("id"),tenant=clean(c.req.query("institutionId"),64);
+ if(!validUuid(assessmentId)||!validUuid(tenant))return c.json({error:"validation_error"},400);
+ const member=await requireInstitutionRole(a,tenant,["institution_admin","staff","lecturer"]);if(!member)return c.json({error:"forbidden"},403);
+ const {data:assessment}=await a.supabase.from("assessments").select("id,course_id,max_score").eq("id",assessmentId).eq("institution_id",tenant).maybeSingle();if(!assessment)return c.json({error:"not_found"},404);
+ if(member.role==="lecturer"){const {data:course}=await a.supabase.from("courses").select("id").eq("id",assessment.course_id).eq("lecturer_membership_id",member.id).maybeSingle();if(!course)return c.json({error:"forbidden"},403);}
+ const {data,error}=await a.supabase.from("assessment_submissions").select("id,learner_id,answers,score,status,submitted_at,graded_at,feedback,learner_records(first_name,last_name,learner_number)").eq("institution_id",tenant).eq("assessment_id",assessmentId).order("submitted_at");
+ if(error)return c.json({error:"submissions_read_failed"},500);
+ return c.json({submissions:data||[]});
+});
+
 app.post("/api/v1/assessments/submissions/:submissionId/grade",async(c)=>{
  const a=await requireSignedIn(c);if("error" in a)return c.json({error:"unauthorized"},401);
  const submissionId=c.req.param("submissionId");let body:Record<string,unknown>;try{body=await c.req.json<Record<string,unknown>>()}catch{return c.json({error:"invalid_json"},400)}
