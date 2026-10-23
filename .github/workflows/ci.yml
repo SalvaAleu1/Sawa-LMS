@@ -7,6 +7,26 @@ on:
 jobs:
   verify:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: sawalearn_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d sawalearn_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      PGHOST: localhost
+      PGPORT: 5432
+      PGUSER: postgres
+      PGPASSWORD: postgres
+      PGDATABASE: sawalearn_test
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -15,8 +35,40 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
       - run: pnpm install --no-frozen-lockfile
       - run: pnpm typecheck
       - run: pnpm typecheck:api
       - run: pnpm build
       - run: pnpm test
+      - name: Bootstrap isolated Supabase-compatible test database
+        run: psql -v ON_ERROR_STOP=1 -f tests/database/bootstrap.sql
+      - name: Validate all database migrations in order
+        shell: bash
+        run: |
+          set -euo pipefail
+          for migration in supabase/migrations/*.sql; do
+            echo "Applying $migration"
+            psql -v ON_ERROR_STOP=1 -f "$migration"
+          done
+      - name: Assert required tables, RLS and tenant constraints exist
+        run: |
+          psql -v ON_ERROR_STOP=1 <<'SQL'
+          do $$
+          begin
+            if (select count(*) from information_schema.tables where table_schema='public' and table_name in ('institutions','institution_memberships','learner_records','courses','grades','partner_applications','institution_subscriptions','cash_receipts')) <> 8 then
+              raise exception 'required SawaLearn tables are missing';
+            end if;
+            if not (select relrowsecurity from pg_class where oid='public.learner_records'::regclass) then
+              raise exception 'learner_records RLS is not enabled';
+            end if;
+            if not exists (select 1 from pg_constraint where conname='enrolments_course_same_tenant_fk') then
+              raise exception 'tenant-safe course enrolment constraint is missing';
+            end if;
+            if not exists (select 1 from pg_proc where proname='redeem_first_admin_invite') then
+              raise exception 'first-admin invitation redemption function is missing';
+            end if;
+          end $$;
+          SQL
