@@ -502,7 +502,7 @@ app.post("/api/v1/institution/results/:id/action",async(c)=>{
 
 
 const validUuid=(value:string)=>/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
-async function requireInstitutionRole(a:{user:{id:string};supabase:ReturnType<typeof createClient>}, institutionId:string, roles:string[]) {
+async function requireInstitutionRole(a:any, institutionId:string, roles:string[]) {
  const {data}=await a.supabase.from("institution_memberships").select("id,role").eq("institution_id",institutionId).eq("user_id",a.user.id).eq("status","active").maybeSingle();
  return data && roles.includes(data.role) ? data : null;
 }
