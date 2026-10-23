@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import type { FormEvent } from "react";
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { ClipboardCheck, FileText, Plus, RefreshCw } from "lucide-react";
+import { ClipboardCheck, RefreshCw } from "lucide-react";
 
 type Assessment = {id:string;title:string;course_id:string;published:boolean;max_score:number;starts_at?:string|null;ends_at?:string|null};
 type Question = {id:string;position:number;question_type:string;prompt:string;options:string[];points:number};
