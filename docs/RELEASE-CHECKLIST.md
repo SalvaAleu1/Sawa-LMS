@@ -19,7 +19,8 @@
 - [ ] Create platform owner membership securely; do not add an open public owner-signup route.
 - [ ] Submit an institution application, review it, approve it and redeem the one-time first-admin invitation.
 - [ ] Test invite email verification, member activation, user-cap enforcement and archive/history retention.
-- [ ] Test courses, enrolments, materials, assignments, assessments, attendance, grades, result publication and timetable records with distinct roles.
+- [ ] Test courses, enrolments, materials, assignments, assessment question authoring, objective auto-grading, manual grading, attendance, grades, staged result approval/publication and timetable records with distinct roles.
+- [ ] Test published-grade term GPA/CGPA transcripts, certificate issuance, public certificate verification and revoked-certificate behavior.
 - [ ] Test cross-tenant access denial with real authenticated JWTs in the deployed environment.
 - [ ] Test private R2 upload/download, MIME/size limits, plan quota enforcement and learner course-enrolment checks.
 - [ ] Record a cash receipt without confirmation, verify it remains pending, then confirm it as an authorized operator.

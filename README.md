@@ -6,7 +6,8 @@ SawaLearn is a multi-tenant learning and institution-management platform for uni
 ## Included workflows
 - Institution application intake, platform review and controlled first-administrator invitations.
 - Institution sign-in and tenant-scoped workspace.
-- Learner records, staff/member invitations and activation, courses, enrolments, learning materials, assignments, assessments, attendance sessions and records, grades, result publication, announcements and timetable records.
+- Learner records, staff/member invitations and activation, courses, enrolments, learning materials, assignments, assessment question authoring, learner submissions, objective auto-grading and manual grading, attendance sessions and records, grades, staged result approval/publication, announcements and timetable records.
+- Published-grade transcript calculations (term GPA and cumulative GPA) and one-time-token certificate issuance with public verification.
 - Private Cloudflare R2 uploads with file-type/size validation, institution membership checks and plan storage-quota checks.
 - Subscription review, manually recorded and confirmed cash receipts, platform-owner extension/termination actions, seven-day renewal reminders and grace-period overdue alerts.
 - Idempotent email notification queue with retries and capacity warnings at 80%, 90% and 100%.
@@ -47,7 +48,7 @@ Worker secrets (never expose in frontend variables or source control):
 - `RESEND_API_KEY`
 - `RESEND_FROM`
 
-Set `APP_BASE_URL` as a Worker variable to the exact frontend origin for CORS and invitation redirects. The Worker configuration binds the private R2 bucket `sawalearn-files` and schedules daily maintenance at 02:17 UTC. Create the bucket before deploying the Worker.
+Set `APP_BASE_URL` as a Worker variable to the exact frontend origin for CORS and invitation redirects. The Worker configuration binds the private R2 bucket `sawalearn-files` and schedules daily maintenance at 02:17 UTC. Create the bucket before deploying the Worker. For the frontend, use Cloudflare Pages with the repository root as the project root, build command `pnpm build`, and output directory `dist`. The `public/_redirects` file keeps direct SPA routes working on refresh. Deploy the Worker separately from `services/api` using Wrangler.
 
 ## Database rollout
 Apply migrations in filename order from `supabase/migrations` to the intended Supabase project after reviewing them. GitHub Actions applies them to an isolated PostgreSQL instance and executes a two-tenant RLS/foreign-key smoke test; this does not apply migrations to your production project.
