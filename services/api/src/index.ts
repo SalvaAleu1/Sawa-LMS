@@ -368,6 +368,27 @@ async function runScheduledTasks(env:Env["Bindings"]){
    await db.from("audit_logs").insert({institution_id:s.institution_id,action:"subscription_overdue_owner_decision_required",target_type:"institution_subscription",target_id:s.id,metadata:{period_end:s.period_end,grace_end:s.grace_end}});
   }
  }
+
+ const month=new Date().toISOString().slice(0,7);
+ const {data:institutions}=await db.from("institutions").select("id,display_name").eq("status","active").limit(1000);
+ for(const institution of institutions||[]){
+  const {data:sub}=await db.from("institution_subscriptions").select("id,subscription_plans(max_active_users,storage_limit_bytes)").eq("institution_id",institution.id).in("status",["active","grace_period","overdue"]).order("created_at",{ascending:false}).limit(1).maybeSingle();
+  if(!sub)continue;
+  const plan=sub.subscription_plans as unknown as {max_active_users:number;storage_limit_bytes:number}|null;if(!plan)continue;
+  const {count:activeUsers}=await db.from("institution_memberships").select("id",{count:"exact",head:true}).eq("institution_id",institution.id).eq("status","active");
+  const {data:storage}=await db.from("storage_usage").select("used_bytes").eq("institution_id",institution.id).maybeSingle();
+  const userPercent=Math.floor(Number(activeUsers||0)/Number(plan.max_active_users)*100);
+  const storagePercent=Math.floor(Number(storage?.used_bytes||0)/Number(plan.storage_limit_bytes)*100);
+  for(const metric of [{name:"active_users",value:userPercent},{name:"storage",value:storagePercent}]){
+   const level=metric.value>=100?100:metric.value>=90?90:metric.value>=80?80:0;if(!level)continue;
+   const key="capacity:"+institution.id+":"+metric.name+":"+level+":"+month;
+   const {data:admins}=await db.from("institution_memberships").select("user_id,profiles(email)").eq("institution_id",institution.id).eq("role","institution_admin").eq("status","active");
+   for(const admin of admins||[]){
+    const profile=admin.profiles as unknown as {email?:string}|null;if(!profile?.email)continue;
+    await db.from("notifications").upsert({institution_id:institution.id,recipient_user_id:admin.user_id,channel:"email",template_key:"capacity_warning",payload:{to:profile.email,subject:"SawaLearn capacity alert: "+institution.display_name,text:"Your institution is using "+metric.value+"% of its "+(metric.name==="storage"?"storage allowance":"active-user allowance")+". At 100%, new activations or uploads that exceed the allowance are blocked; existing records remain available."},scheduled_at:new Date().toISOString(),status:"queued",idempotency_key:key+":"+admin.user_id},{onConflict:"idempotency_key",ignoreDuplicates:true});
+   }
+  }
+ }
  if(env.RESEND_API_KEY&&env.RESEND_FROM){
   const {data:queue}=await db.from("notifications").select("id,payload,attempts").eq("channel","email").eq("status","queued").lte("scheduled_at",new Date().toISOString()).order("scheduled_at").limit(50);
   for(const n of queue||[]){
