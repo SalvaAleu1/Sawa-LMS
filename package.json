@@ -9,7 +9,8 @@
     "typecheck": "tsc -b --pretty",
     "test": "vitest run",
     "lint": "eslint .",
-    "dev:api": "pnpm --filter @sawalearn/api dev"
+    "dev:api": "pnpm --filter @sawalearn/api dev",
+    "typecheck:api": "pnpm --filter @sawalearn/api typecheck"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.57.0",
@@ -19,6 +20,7 @@
   },
   "devDependencies": {
     "@eslint/js": "^9.17.0",
+    "@types/node": "^22.10.5",
     "@types/react": "^18.3.18",
     "@types/react-dom": "^18.3.5",
     "@vitejs/plugin-react": "^4.3.4",
