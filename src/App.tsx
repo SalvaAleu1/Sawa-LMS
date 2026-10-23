@@ -1,7 +1,7 @@
 import { useState } from "react";
 import PartnerApplication from "./PartnerApplication";
 import "./partner.css";
-import { BookOpen, GraduationCap, School, Building2, Users, ClipboardCheck, CalendarDays, BarChart3, Settings, Bell, Search, ArrowUpRight, ShieldCheck, Menu, X, ChevronDown, Sparkles, FileText, CircleHelp, Layers3, Clock3 } from "lucide-react";
+import { BookOpen, GraduationCap, Building2, Users, ClipboardCheck, CalendarDays, BarChart3, Settings, Bell, Search, ArrowUpRight, ShieldCheck, Menu, X, ChevronDown, Sparkles, FileText, CircleHelp, Layers3, Clock3 } from "lucide-react";
 
 const nav = [
   { label: "Overview", icon: BarChart3 },
