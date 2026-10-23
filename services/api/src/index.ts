@@ -148,6 +148,45 @@ app.get("/api/v1/platform/partner-applications", async (c) => {
   return c.json({ applications: data || [] });
 });
 
+
+app.post("/api/v1/platform/partner-applications/:id/approve", async (c) => {
+  const access = await requirePlatformOperator(c);
+  if ("error" in access) return c.json({ error: access.error, message: access.error === "forbidden" ? "Platform operator access is required." : "Please sign in again." }, access.error === "forbidden" ? 403 : 401);
+  const id = c.req.param("id");
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id)) return c.json({ error: "validation_error", message: "Invalid application reference." }, 400);
+  let body: Record<string, unknown>;
+  try { body = await c.req.json<Record<string, unknown>>(); }
+  catch { return c.json({ error: "invalid_json", message: "Submit a valid approval request." }, 400); }
+  const slug = clean(body.slug, 60).toLowerCase();
+  const planCode = clean(body.planCode, 30).toLowerCase();
+  const period = clean(body.period, 20);
+  if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(slug) || !["starter","standard","professional","enterprise"].includes(planCode) || !["monthly","annual"].includes(period)) {
+    return c.json({ error: "validation_error", message: "Provide a valid institution URL slug, plan and billing period." }, 400);
+  }
+  // The raw invite token is returned once to the authenticated platform operator.
+  // Only its SHA-256 digest is persisted. Deliver it to the approved contact through a secure channel.
+  const tokenBytes = crypto.getRandomValues(new Uint8Array(32));
+  const token = Array.from(tokenBytes, b => b.toString(16).padStart(2, "0")).join("");
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(token));
+  const tokenHash = Array.from(new Uint8Array(digest), b => b.toString(16).padStart(2, "0")).join("");
+  const { data, error } = await access.supabase.rpc("platform_approve_partner", {
+    p_application_id: id, p_actor: access.user.id, p_slug: slug,
+    p_plan_code: planCode, p_period: period, p_invite_token_hash: tokenHash
+  });
+  if (error) {
+    const status = error.code === "23505" ? 409 : error.code === "42501" ? 403 : 400;
+    return c.json({ error: "approval_failed", message: status === 409 ? "That institution slug is already in use." : status === 403 ? "Platform operator access is required." : "Approval could not be completed. Check the application status and database migrations." }, status);
+  }
+  const row = Array.isArray(data) ? data[0] : data;
+  if (!row?.institution_id || !row?.invite_id) return c.json({ error: "approval_failed", message: "The database did not return the expected approval result." }, 500);
+  return c.json({
+    approved: true, institutionId: row.institution_id, inviteId: row.invite_id,
+    administratorEmail: "The approved contact email is stored with the invitation.",
+    invitationToken: token, expiresInHours: 72,
+    warning: "This token is shown once. Send it only to the approved contact using a secure channel. The recipient must create/sign in to an account before redeeming it."
+  }, 201);
+});
+
 app.patch("/api/v1/platform/partner-applications/:id", async (c) => {
   const access = await requirePlatformOperator(c);
   if ("error" in access) return c.json({ error: access.error, message: access.error === "forbidden" ? "Platform operator access is required." : "Please sign in again." }, access.error === "forbidden" ? 403 : 401);

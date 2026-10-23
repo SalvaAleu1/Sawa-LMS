@@ -33,7 +33,7 @@ begin
  institution_id := i; invite_token_hash := token_hash; return next;
 end $$;
 revoke all on function public.platform_approve_partner(uuid,uuid,text,text,text,text) from public, anon, authenticated;
-grant execute on function public.platform_approve_partner(uuid,uuid,text,text,text) to service_role;
+grant execute on function public.platform_approve_partner(uuid,uuid,text,text,text,text) to service_role;
 
 create or replace function public.platform_record_cash_receipt(
  p_actor uuid,p_institution uuid,p_subscription uuid,p_amount numeric,p_currency char(3),p_received_on date,
