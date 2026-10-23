@@ -317,7 +317,7 @@ app.post("/api/v1/storage/upload",async(c)=>{
  const {data:reserved,error:reserveError}=await a.supabase.rpc("adjust_storage_usage",{p_institution_id:tenant,p_delta:file.size,p_limit:Number(plan.storage_limit_bytes)});
  if(reserveError||reserved===null)return c.json({error:"storage_limit",message:"The institution has reached its storage allowance. Contact the platform owner to change the plan."},413);
  const {data:course}=await a.supabase.from("courses").select("id").eq("id",courseId).eq("institution_id",tenant).maybeSingle();
- if(!course)return c.json({error:"course_not_found",message:"The selected course does not belong to this institution."},404);
+ if(!course){await a.supabase.rpc("adjust_storage_usage",{p_institution_id:tenant,p_delta:-file.size,p_limit:Number(plan.storage_limit_bytes)});return c.json({error:"course_not_found",message:"The selected course does not belong to this institution."},404);}
  const name=file.name.normalize("NFKC").replace(/[^a-zA-Z0-9._-]/g,"_").slice(-100)||"resource";
  const key=tenant+"/"+courseId+"/"+crypto.randomUUID()+"-"+name;
  try {
@@ -504,7 +504,9 @@ app.post("/api/v1/institution/results/:id/action",async(c)=>{
 const validUuid=(value:string)=>/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
 async function requireInstitutionRole(a:any, institutionId:string, roles:string[]) {
  const {data}=await a.supabase.from("institution_memberships").select("id,role").eq("institution_id",institutionId).eq("user_id",a.user.id).eq("status","active").maybeSingle();
- return data && roles.includes(data.role) ? data : null;
+ if(!data||!roles.includes(data.role))return null;
+ const {data:institution}=await a.supabase.from("institutions").select("status").eq("id",institutionId).maybeSingle();
+ return institution?.status==="active" ? data : null;
 }
 
 app.post("/api/v1/assessments/:id/questions",async(c)=>{
@@ -610,7 +612,10 @@ app.get("/api/v1/learners/:learnerId/transcript",async(c)=>{
  if(error)return c.json({error:"transcript_failed"},500);
  const rows=(grades||[]).map((g)=>({score:g.score,letterGrade:g.letter_grade,gradePoints:g.grade_points,credits:Number(g.credits??(g.courses as {credits?:number}|null)?.credits??0),term:g.academic_terms,course:g.courses}));
  const totalCredits=rows.reduce((n,g)=>n+g.credits,0),weighted=rows.reduce((n,g)=>n+(Number(g.gradePoints||0)*g.credits),0);
- return c.json({learner:{name:learner.first_name+" "+learner.last_name,learnerNumber:learner.learner_number},grades:rows,summary:{publishedCourses:rows.length,credits:totalCredits,cgpa:totalCredits?Number((weighted/totalCredits).toFixed(3)):null}});
+ const termGroups=new Map<string,{term:unknown;credits:number;weighted:number;courses:number}>();
+ for(const row of rows){const key=String(row.term?.name||"Unassigned");const group=termGroups.get(key)||{term:row.term,credits:0,weighted:0,courses:0};group.credits+=row.credits;group.weighted+=Number(row.gradePoints||0)*row.credits;group.courses+=1;termGroups.set(key,group);}
+ const termGpas=Array.from(termGroups.entries()).map(([term,g])=>({term,credits:g.credits,courses:g.courses,gpa:g.credits?Number((g.weighted/g.credits).toFixed(3)):null}));
+ return c.json({learner:{name:learner.first_name+" "+learner.last_name,learnerNumber:learner.learner_number},grades:rows,termGpas,summary:{publishedCourses:rows.length,credits:totalCredits,cgpa:totalCredits?Number((weighted/totalCredits).toFixed(3)):null}});
 });
 
 app.post("/api/v1/learners/:learnerId/certificates",async(c)=>{
